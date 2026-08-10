@@ -15,8 +15,15 @@ Enhanced (`GTA5_Enhanced.exe`), singleplayer and FiveM, one build.
   lighting, so none of it can be changed; these are substituted as the frame
   plays and nothing is written to the `.clip`.
 
-**2 — Limits removed**
+**2 — Engine fixes**
 
+- **No stall between every action** — on a modded install the editor pauses for
+  seconds after every seek, cut and marker move. It is waiting for the whole
+  game's streaming to fall idle, which a modded game never does, so it waits out
+  its give-up timer instead. That wait is dropped.
+- **Detail follows the camera** — the world streams around the *player*, so
+  flying the free camera anywhere leaves you filming a scene that is still being
+  loaded for someone standing where you took off.
 - **Longer recordings** — the clip length limit is a memory budget, not a timer,
   which is why a busy street gives you seconds where an empty road gives a
   minute. Lifting it takes ~17 seconds of dense city to **1m 45s**. On by
@@ -278,14 +285,48 @@ project needs rescuing.
 
 ---
 
-## 2 — Limits removed
+## 2 — Engine fixes
 
-The editor is built for clips, not for shots, and most of what stops you is a
-guard rail rather than a technical bound. Each of these is lifted independently
-and each is a single ini key, so any of them can go back to stock on its own.
+Two kinds of thing, both in the way of the same job. Some are guard rails — the
+editor is built for clips, not for shots, and most of what stops you is a policy
+rather than a technical bound. The rest are engine behaviour that is simply wrong
+for an editor: waits that never end, and a world that loads around the player
+while you are filming somewhere else.
 
-Every one resolves separately too: if a pattern does not match on your build the
-mod disables **that** limit and says so in the log, keeping the rest.
+Each is lifted independently and each is a single ini key, so any of them can go
+back to stock on its own. Every one resolves separately too: if a pattern does
+not match on your build the mod disables **that** one and says so in the log,
+keeping the rest.
+
+### The stall between every action
+
+`FastPrecache=1` (default), `FastPrecacheAudio=1`, `PrecacheMaxMs=1500`,
+`UrgentModelLoadMs=250`, `FastPrecacheDuringRender=0`.
+
+Seek, cut, or nudge a marker on a heavily modded install and the editor freezes
+for seconds with the controls locked. Everyone assumes memory, and every heap,
+pool and VRAM adjuster ever pointed at it has failed to help.
+
+It is not a capacity problem. After every seek the editor precaches, and stock
+code will not continue until the number of outstanding streaming requests **for
+the whole game** has been zero for ten consecutive frames. A modded game never
+reaches zero — the scene streamer rescores what is visible every frame, and the
+replay's own preloader adds requests inside the same loop — so the wait always
+runs to its give-up timer instead. Nothing you can allocate makes an idle
+requirement true, which is exactly why more memory never fixed it.
+
+Worse, that timer is counted in frames capped at 33 ms each, so it is a *frame*
+budget wearing a millisecond label: at 200 fps its 6600 ends up meaning 200
+frames. High frame rate makes the stall longer, not shorter.
+
+The mod drops the whole-game idle requirement and keeps the wait that actually
+matters — the replay's own ±4 s preload — under a ceiling. Two smaller waits go
+with it: a separate audio one, and a blocking model load that stock gives 5000 ms
+to finish. Everything here is gated on the editor being open, so gameplay,
+recording and clip loading are untouched.
+
+Renders keep the stock wait by default, since a render has time and would rather
+have the frame complete.
 
 ### Recording length
 
@@ -562,6 +603,11 @@ Both files live in `RockstarEditorPlus\`, beside the `.asi`.
 | `UncapZoom` | 1 | widen the 0.45x–4.50x range to the engine's own 1–130° |
 | `ReplayBlocks` | 128 | recording length, in 4 MB blocks. 3–128 |
 | `UnlockCameraRestrictions` | 1 | free camera on first-person clips |
+| `FastPrecache` | 1 | drop the wait for whole-game streaming idle |
+| `FastPrecacheAudio` | 1 | and its separate audio wait |
+| `FastPrecacheDuringRender` | 0 | renders keep the stock wait; 1 only to A/B it |
+| `PrecacheMaxMs` | 1500 | ceiling on the preload wait. 0 = stock (unbounded) |
+| `UrgentModelLoadMs` | 250 | ceiling on a blocking model load. 0 = stock (5000) |
 | `OverrideTimeOfDay` | 0 | relight the clip at `TimeOfDay` instead of its recorded clock |
 | `TimeOfDay` | 720 | minutes past midnight. 720 = 12:00 |
 | `OverrideWeather` | 0 | replace the clip's recorded weather |
