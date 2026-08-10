@@ -242,6 +242,12 @@ namespace render
 		int         s_autoOpen   = 0;   // ticks until the frame pass is started for us
 		std::string s_pendingWav;
 
+		// Last value seen by the undiverted-bake watcher in pump(). File scope
+		// rather than a local static so finish() can account for the ONE
+		// transition into bake that we cause ourselves - see the write there.
+		// -2 means "not seeded yet"; the watcher never judges its first read.
+		int         s_lastType   = -2;
+
 		// True when this render came from the Export button rather than the
 		// menu. Only an export should close playback afterwards - doing it to a
 		// menu-started render would eject you from the clip you were editing.
@@ -362,10 +368,13 @@ namespace render
 		// becomes a harmless no-op. Every other source - savegame, script, cloud,
 		// profanity - is untouched.
 		//
-		// Deliberately NOT gated on a render being active. The user wants this gone
-		// while scrubbing in the clip editor too, and suppressing it everywhere is
-		// both what was asked for and the more predictable behaviour: a spinner
-		// that only sometimes appears is worse than one that never does.
+		// Gated on a render, which it did not used to be - it suppressed the editor
+		// spinner everywhere, on the reasoning that a spinner appearing only
+		// sometimes is worse than one that never appears. That was wrong about who
+		// it affects. The ring during a seek is stock behaviour people have used for
+		// years and read as "the editor is working"; taking it away outside a render
+		// buys nothing and makes a normal editor look broken. A rendered FRAME must
+		// carry no UI - that is the whole requirement, and it stops at the render.
 		// -------------------------------------------------------------------------
 		using FnSpinnerOn = void(__fastcall*)(const char*, int, int);
 		FnSpinnerOn origSpinnerOn = nullptr;
@@ -373,11 +382,12 @@ namespace render
 		void __fastcall hkSpinnerOn(const char* bodyText, int icon, int sourceIndex)
 		{
 			if (sourceIndex == gsig::SPINNER_SOURCE_VIDEO_EDITOR &&
-			    Config::get().hideEditorSpinner)
+			    s_step != Step::Idle)
 			{
-				// Only mark the frame unclean if we are mid-render. Outside one
-				// this is just the editor being quiet, not a frame to reject.
-				if (s_step != Step::Idle) { s_spinnerSeen = true; ++s_spinnerHits; }
+				// Suppressing alone would leave a frame the game itself considered
+				// unready, so mark it too.
+				s_spinnerSeen = true;
+				++s_spinnerHits;
 				return;
 			}
 			origSpinnerOn(bodyText, icon, sourceIndex);
@@ -394,16 +404,15 @@ namespace render
 		// never fired. Hooking the callee cannot be bypassed: every route,
 		// wrapper included, ends here.
 		//
-		// Suppressed during a capture (a rendered frame carries no UI), and while
-		// the editor is up if HideEditorSpinner is set - which is what removes the
-		// ring when scrubbing the timeline, not just in renders.
+		// Suppressed during a capture only - a rendered frame carries no UI. Outside
+		// one the ring is drawn exactly as stock, which is what people expect to see
+		// while a seek is working.
 		// -------------------------------------------------------------------------
 		using FnDrawSpinner = void(__fastcall*)(void*, void*, int, int, int);
 		FnDrawSpinner origDrawSpinner = nullptr;
 
 		void __fastcall hkDrawSpinner(void* pos, void* size, int a, int b, int c)
 		{
-			const Config& cfg = Config::get();
 			if (s_step != Step::Idle)
 			{
 				// Mid-capture: suppress and mark the frame unclean, exactly as the
@@ -412,7 +421,6 @@ namespace render
 				++s_spinnerHits;
 				return;
 			}
-			if (cfg.hideEditorSpinner && game::isEditModeActive()) return;
 
 			origDrawSpinner(pos, size, a, b, c);
 		}
@@ -817,7 +825,18 @@ namespace render
 			// Done here and nowhere earlier: for the whole render the type has
 			// to stay PREVIEW, because that is precisely what keeps the game's
 			// own encoder out of the way.
-			if (s_fromExport) game::setPlaybackType(gsig::PLAYBACK_TYPE_BAKE);
+			if (s_fromExport)
+			{
+				game::setPlaybackType(gsig::PLAYBACK_TYPE_BAKE);
+
+				// Account for it, or the watcher in pump() reports our own write
+				// as the vanilla encoder starting. It tests for a transition INTO
+				// bake while no export is pending and the renderer is idle - and
+				// s_step was set to Idle at the top of this function, so all three
+				// hold. It fired on every successful export from the Export
+				// button, which is the one path where nothing is wrong at all.
+				s_lastType = gsig::PLAYBACK_TYPE_BAKE;
+			}
 
 			// Return to the editor the way a finished bake does. Deferred via the
 			// game's own flag, never a direct Close(): this runs inside the
@@ -1526,7 +1545,6 @@ namespace render
 			//    never saw the press - which is exactly the report we could not
 			//    diagnose. Say so, with every precondition, at the moment it
 			//    happens.
-			static int s_lastType = -2;
 			if (game::addr_g_PlaybackType)
 			{
 				const int t = *(int*)game::addr_g_PlaybackType;
@@ -2345,10 +2363,19 @@ namespace render
 
 			// Nothing usable is on screen during a load, and the clock is not
 			// moving either, so contribute neither a sample nor any time.
+			//
+			// The stall timer is reset too, and that is not tidying. It holds the
+			// TIMESTAMP stillness began at, and this path skips the test that
+			// would clear it - so a load left a mark from seconds ago, and the
+			// next still frame subtracted against it and blew straight past the
+			// limit. Below is explicit that a clock stopping "while nothing is
+			// loading" is the end of the project; time spent loading is therefore
+			// not time the clock was stopped, and must not count towards it.
 			if (game::replayBusy() || s_spinnerSeen)
 			{
-				s_spinnerSeen = false;
-				s_lastClock   = -1.0f;
+				s_spinnerSeen    = false;
+				s_lastClock      = -1.0f;
+				s_clockStillTick = 0;
 				return;
 			}
 
@@ -2571,8 +2598,10 @@ namespace render
 				// belongs before anything is exposed. Sliding avoids seeking DURING
 				// the exposure, which this is not - it is the same seek begin()
 				// already does, repeated now that the speed is known.
-				s_slideTime = 0.0;
-				s_lastClock = -1.0f;   // the next delta belongs to the new speed
+				s_slideTime      = 0.0;
+				s_lastClock      = -1.0f;   // the next delta belongs to the new speed
+				s_clockStillTick = 0;       // and so does the stall timer
+
 				game::jumpProjectTo(seekTime(), 0);
 				return;
 			}

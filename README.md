@@ -351,8 +351,34 @@ Stock leashes the free camera to **30 m** from the player and yanks it back —
 the same value feeds the out-of-range warning and the fallback to the recorded
 camera, so lifting it once covers all three.
 
-The world still streams around the *player*, not the camera, so expect LOD to
-drop off at distance. That is the trade, and it is why the leash exists.
+Stock also streams the world around the *player*, not the camera, which is the
+other half of why the leash exists — see **Streaming focus** below, which
+removes it.
+
+### Streaming focus
+
+`StreamingFocusOnCamera=1` (default). Menu: **Detail Follows → Camera**.
+
+Everything that decides what the engine keeps at full detail centres on one
+point, and stock that point is the player ped: map data and IPL cull boxes, the
+HD/LOD scene streamer, static collision, where peds and vehicles are populated,
+and which peds get full AI and animation. Fly out a few hundred metres and the
+world you are pointing at is still being streamed for someone standing where you
+took off — low LOD, missing map, and peds and traffic that thin out around the
+shot.
+
+This moves that point onto the editor camera, so detail arrives where you are
+looking. Pair it with `UnlimitedCameraDistance`: a camera that can go anywhere
+and a world that only exists in one place is half a feature.
+
+It is the game's own mechanism, not a patch — the player-switch camera and
+Rockstar's internal debug free camera ask for the same thing, through the same
+flag on the rendered camera frame. Nothing is left behind when it goes off
+either: the engine restores the player-ped focus by itself on the first frame
+the flag is absent.
+
+The cost is honest streaming work. Whipping the camera across the city makes the
+streamer fetch the map along the way, the same as driving it would.
 
 ### Camera collision
 
@@ -530,9 +556,9 @@ Both files live in `RockstarEditorPlus\`, beside the `.asi`.
 | `ShakeAxis*` | 1.0 | per-axis weights; 0 disables an axis |
 | `UnlimitedCameraDistance` | 1 | lift the 30 m leash |
 | `MaxCameraDistance` | 20000 | metres |
+| `StreamingFocusOnCamera` | 1 | stream map, collision and peds around the camera, not the player |
 | `DisableCameraCollision` | 1 | pass through geometry |
 | `BypassProfanityFilter` | 1 | naming/export works with Social Club offline |
-| `HideEditorSpinner` | 1 | no spinner while scrubbing |
 | `UncapZoom` | 1 | widen the 0.45x–4.50x range to the engine's own 1–130° |
 | `ReplayBlocks` | 128 | recording length, in 4 MB blocks. 3–128 |
 | `UnlockCameraRestrictions` | 1 | free camera on first-person clips |

@@ -78,13 +78,8 @@ set_target_properties(RockstarEditorPlus PROPERTIES
 # =============================================================================
 set(REP_INI_MAIN [==[
 ; RockstarEditorPlus - editor settings.   Render settings are in Render.ini.
-;
-; Everything here is also in the in-game menu, under the "Rockstar Editor+" row
-; of a marker's menu, where each row explains itself. This file is the terse
-; version, and what the menu writes back to.
-;
-; Inline "; ..." is safe after a NUMBER. Never after a path or a word - Windows
-; keeps the comment as part of the value.
+; Every row is also in the in-game menu, which explains each one and writes here.
+; Inline "; ..." is safe after a NUMBER. Never after a path or a word.
 
 [RockstarEditorPlus]
 
@@ -106,8 +101,8 @@ Alpha=1                    ; tension: 0 uniform / 0.5 centripetal / 1 chordal
                            ; no effect while NaturalPacing=1
 
 ; --- Shake ------------------------------------------------------------------
-; Per-marker: set a marker's Shake row to "Rockstar Editor+". These are the
-; defaults each marker inherits. Handheld starting point: 2.0 @ 0.20.
+; Defaults each marker inherits; per-marker, set its Shake row to "Rockstar
+; Editor+". Handheld starting point: 2.0 @ 0.20.
 ShakeSimpleMode=1          ; 1 = Amplitude/Frequency, 0 = the Sway/Jitter model
 ShakeAmplitude=1.0         ; degrees; 0.05 m of travel per degree
 ShakeFrequency=0.35        ; Hz
@@ -139,11 +134,11 @@ ShakeAxisYaw=1.0
 
 ; --- Editor limits ----------------------------------------------------------
 UnlimitedCameraDistance=1  ; lift the 30m leash off the player
-MaxCameraDistance=20000    ; the world streams near the player - expect LOD pop
+MaxCameraDistance=20000    ; metres
+StreamingFocusOnCamera=1   ; stream map, collision and peds around the CAMERA
 DisableCameraCollision=1   ; camera passes through geometry
 BypassProfanityFilter=1    ; naming/export still works with Social Club offline
 UnlockCameraRestrictions=1 ; free camera on first-person clips
-HideEditorSpinner=1        ; no spinner ring while scrubbing
 UncapZoom=1                ; widen the stock 0.45x..4.50x range
 ZoomMinFov=1               ; 1..130 is the engine's own clamp
 ZoomMaxFov=130             ; readout is 45/fov: 1 = 45x in, 130 = 0.35x out
@@ -156,42 +151,21 @@ PrecacheMaxMs=1500         ; ceiling on the preload wait. 0 = stock (unbounded)
 UrgentModelLoadMs=250      ; ceiling on a blocking model load. 0 = stock (5000)
 
 ; --- Scene: the clip's time of day and weather ------------------------------
-; A clip records the clock and the weather every frame and plays them back, so
-; neither can normally be changed. These substitute different values as the
-; frame is played. Nothing is written to the .clip - switch either off and the
-; clip is exactly as recorded again.
-; Both are also rows in the Rockstar Editor+ menu, under Scene.
+; Substituted as the frame plays. Nothing is written to the .clip.
 OverrideTimeOfDay=0        ; 1 = use TimeOfDay instead of the recorded clock
 TimeOfDay=720              ; minutes past midnight. 720 = 12:00, 1065 = 17:45
 
 OverrideWeather=0          ; 1 = use the four settings below
-; Index into weather.xml's load order:
-;   0 EXTRASUNNY  1 CLEAR   2 CLOUDS     3 SMOG     4 FOGGY
-;   5 OVERCAST    6 RAIN    7 THUNDER    8 CLEARING 9 NEUTRAL
-;  10 SNOW       11 BLIZZARD 12 SNOWLIGHT 13 XMAS   14 HALLOWEEN
+; 0 EXTRASUNNY 1 CLEAR 2 CLOUDS 3 SMOG 4 FOGGY 5 OVERCAST 6 RAIN 7 THUNDER
+; 8 CLEARING 9 NEUTRAL 10 SNOW 11 BLIZZARD 12 SNOWLIGHT 13 XMAS 14 HALLOWEEN
 WeatherType=0
 WeatherBlendTo=-1          ; second type to blend towards, -1 = none
 WeatherBlend=0.0           ; 0..1 between WeatherType and WeatherBlendTo
 WeatherWetness=-1          ; 0..1 wet roads and puddles; -1 = as recorded
-
-; MASTER SWITCH for everything above. A clip also records the fully RESOLVED
-; timecycle keyframe every frame, which is why moving the clock on its own only
-; moves the sun - the sky, ambient and fog are baked in. 1 stands that down so
-; the timecycle is evaluated live from the new time and weather.
-; 0 keeps the clip's own lighting - which matters if the shot carried an
-; interior or mission grade - and switches the settings above OFF with it,
-; because a new time under recorded lighting is just an inconsistent sky.
-LiveTimecycle=1
+LiveTimecycle=1            ; master switch. 0 keeps the clip's baked lighting
 
 ; --- Recording length -------------------------------------------------------
-; How long one clip can be, in 4 MB blocks. The ring IS the clip: it fills, the
-; clip saves, and recording rolls into a new one - so length is ring size over
-; how fast the scene fills it, which is why traffic shortens it. The game ships
-; 30 because it clamps to that whenever the replay heap is small; the heap is
-; widened first, so the clamp stops firing. 128 costs ~604 MB reserved and
-; records ~1m45 of dense city where stock gives ~17 seconds. Takes effect at the
-; next recording, so restart before shooting.
-ReplayBlocks=128           ; 3..128
+ReplayBlocks=128           ; 3..128. 128 = ~1m45 of city, ~604 MB. Restart first
 
 ; --- Diagnostics ------------------------------------------------------------
 ShakeDebugLog=0
@@ -207,12 +181,8 @@ MenuStep=2
 
 set(REP_INI_RENDER [==[
 ; RockstarEditorPlus - render settings.
-;
-; "RE+ Render Settings.exe" in this folder edits every key here and explains
-; what each one does and costs. This file is only the terse version.
-;
-; Inline "; ..." is safe after a NUMBER. Never after a path or a word - Windows
-; keeps the comment as part of the value.
+; "RE+ Render Settings.exe" in this folder edits every key and explains the cost.
+; Inline "; ..." is safe after a NUMBER. Never after a path or a word.
 
 [Render]
 
@@ -230,8 +200,7 @@ RenderSettleSubFrames=1    ; Walking: wait between sub-samples. Never 0
 RenderHighlightBoost=0.9   ; keeps speculars bright through accumulation
 RenderJpeg=0               ; 0 = PNG
 RenderQuality=90           ; JPEG only
-; Auto is known to get this wrong on Legacy, FiveM especially - renders come out
-; with the colours wrong while the screen looks fine. Try 1, then 2.
+; Colours wrong but the screen fine? Auto misreads Legacy/FiveM. Try 1, then 2.
 RenderChannelOrder=0       ; 0 auto / 1 RGBA / 2 BGRA
 RenderHideHud=1            ; hide the editor HUD and cursor while rendering
 ExportCloseWhenDone=1      ; return to the editor menus when done
@@ -251,10 +220,7 @@ RenderVideoArgs=-c:v libx264 -crf 16 -preset slow -pix_fmt yuv420p
 RenderVideoExt=mp4
 
 ; --- Audio ------------------------------------------------------------------
-; One Export press: a sound pass, then the frames. Works in either RenderMode -
-; Video muxes it in, Frames leaves audio.wav beside the sequence with the ffmpeg
-; line to attach it written into assemble.txt.
-RenderAudio=1
+RenderAudio=1              ; one Export: a sound pass, then the frames
 RenderMarkerSpeed=1        ; render a marker's slow/fast motion. 0 = ignore it
 ; Borrow a track from a file instead. Ignored while RenderAudio=1.
 AudioFromFile=

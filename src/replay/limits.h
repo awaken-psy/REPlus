@@ -27,5 +27,14 @@ namespace limits
 	// MinFov/MaxFov metadata. Locates those fields by shape and does nothing at
 	// all if the match is ambiguous. Restores them when switched back off.
 	void applyZoomLimit(void* director);
+
+	// Per-frame. Moves the world's streaming and population focus onto the
+	// editor camera, so the map, the collision and the peds around wherever you
+	// have flown are the ones the engine keeps at full detail - instead of the
+	// ones around the player you left behind.
+	//
+	// Sets one flag on the frame the director is about to render; the game does
+	// the rest, and undoes it by itself the first frame the flag is absent.
+	void applyStreamingFocus(void* director);
 }
 

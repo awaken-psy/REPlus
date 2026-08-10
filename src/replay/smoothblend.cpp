@@ -1473,6 +1473,14 @@ namespace smoothblend
 		limits::applyDistanceLimit(self);
 		limits::applyZoomLimit(self);
 
+		// After the original, like the two above, and for a stronger reason:
+		// this writes into the frame the director is about to hand out, and
+		// UpdateSmoothing is the last thing that rebuilds it. Setting the flag
+		// before the original ran would still be there afterwards - the
+		// smoothing only touches the matrix and the FOV - but it would be true
+		// by accident rather than by construction.
+		limits::applyStreamingFocus(self);
+
 		// Late hooks. Reaching IsMarkerControlEditable means going through the
 		// marker storage, which does not exist until a clip is open - so this
 		// cannot be done from install() and has to be retried until it takes.

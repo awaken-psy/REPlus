@@ -196,7 +196,7 @@ namespace menu
 			// state machine in a screen it has no way to draw. Expanding in
 			// place is the honest version.
 			ROW_G_HEADER,
-			ROW_COLLISION, ROW_DISTANCE, ROW_ZOOM,
+			ROW_COLLISION, ROW_DISTANCE, ROW_STREAMFOCUS, ROW_ZOOM,
 			ROW_G_PATH, ROW_G_ROT, ROW_G_FOV, ROW_G_ALPHA, ROW_G_PROFILE,
 			// Scene page. These do not touch the .clip - they substitute values
 			// as the frame is played, so they are live and they are undone the
@@ -416,6 +416,10 @@ namespace menu
 				{
 					s_rows[s_shown++] = ROW_COLLISION;
 					s_rows[s_shown++] = ROW_DISTANCE;
+					// Directly under Distance Limit: it is the other half of
+					// that setting, and reading them apart is how you end up
+					// blaming the leash for the streaming.
+					s_rows[s_shown++] = ROW_STREAMFOCUS;
 					s_rows[s_shown++] = ROW_ZOOM;
 				}
 				else
@@ -526,6 +530,7 @@ namespace menu
 			case ROW_AX_YAW:    return "Axis Yaw";
 			case ROW_COLLISION: return "Camera Collision";
 			case ROW_DISTANCE:  return "Distance Limit";
+			case ROW_STREAMFOCUS: return "Detail Follows";
 			case ROW_ZOOM:      return "Zoom Range";
 			case ROW_G_PATH:    return "Spline Path";
 			case ROW_G_ROT:     return "Spline Rotation";
@@ -606,6 +611,11 @@ namespace menu
 				return (Config::get().disableCameraCollision ? "Off" : "On");
 			if (row == ROW_DISTANCE)
 				return (Config::get().unlimitedCameraDistance ? "Unlimited" : "Stock (30m)");
+			// Named after what it does rather than after the engine's term for
+			// it: "Camera" / "Player" is the actual choice being made, and
+			// "focus" means something else entirely two rows away in DOF.
+			if (row == ROW_STREAMFOCUS)
+				return (Config::get().streamingFocusOnCamera ? "Camera" : "Player");
 			if (row == ROW_ZOOM)
 			{
 				// The editor's own zoom readout is 45 / fov, so quote the range
@@ -697,6 +707,7 @@ namespace menu
 			case ROW_ROT:   return 3;
 			case ROW_COLLISION:
 			case ROW_DISTANCE:
+			case ROW_STREAMFOCUS:
 			case ROW_ZOOM:
 			case ROW_G_PATH:
 			case ROW_G_ROT:
@@ -886,8 +897,11 @@ namespace menu
 				return "Off lets the camera pass through geometry, which also stops the "
 				       "push-off bending the path away from your markers.";
 			case ROW_DISTANCE:
-				return "Lift the editor's 30 m leash from the player. Far out you will "
-				       "see LOD pop - that is streaming, not this.";
+				return "Lift the editor's 30 m leash from the player. Set Detail Follows "
+				       "to Camera as well, or far out you will see LOD pop.";
+			case ROW_STREAMFOCUS:
+				return "Where the world streams full detail: map, collision and peds "
+				       "around the Camera, or around the Player as the game shipped.";
 			case ROW_ZOOM:
 				return "Widen the editor's zoom range beyond the stock 0.45x-4.50x. "
 				       "The ends are set in the ini.";
@@ -1010,6 +1024,16 @@ namespace menu
 				Config& c = Config::get();
 				c.unlimitedCameraDistance = delta > 0;
 				c.writeBool("UnlimitedCameraDistance", c.unlimitedCameraDistance);
+				return;
+			}
+			if (row == ROW_STREAMFOCUS)
+			{
+				// Takes effect on the next frame with no transition of its own -
+				// the streamer simply starts fetching around the other point, so
+				// what you see is the world filling in rather than a switch.
+				Config& c = Config::get();
+				c.streamingFocusOnCamera = delta > 0;
+				c.writeBool("StreamingFocusOnCamera", c.streamingFocusOnCamera);
 				return;
 			}
 			if (row == ROW_ZOOM)

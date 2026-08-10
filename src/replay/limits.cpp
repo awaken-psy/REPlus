@@ -525,6 +525,90 @@ namespace limits
 		if (*maxFov != cfg.zoomMaxFov) *maxFov = cfg.zoomMaxFov;
 	}
 
+	// =========================================================================
+	//  Streaming and population focus on the camera
+	// =========================================================================
+	//  The companion to the distance leash above. Lifting the leash lets the
+	//  camera go; it does not tell the WORLD that the camera went. Every system
+	//  that decides what to keep at full detail takes its centre from
+	//  CFocusEntityMgr, whose default is the player ped:
+	//
+	//    CStreaming::Update           IPL cull boxes, zoned assets, managed IMAP
+	//                                 groups, the map-data box streamer
+	//    CSceneStreamerMgr            the spherical HD/LOD streamer position
+	//    fwBoxStreamer                static collision and navmesh
+	//    CPedPopulation               where ambient peds and vehicles belong
+	//    CPedAILodManager             which peds get full AI and animation
+	//
+	//  So flying two kilometres out leaves you looking at a world that is still
+	//  being streamed for somebody standing where you started. That is the LOD
+	//  pop and the missing map the leash's own comment warns about, and this is
+	//  the fix for it rather than a workaround.
+	//
+	//  HOW, and why it is one bit rather than a hook. Once per frame the camera
+	//  interface caches the frame that was actually rendered, and checks this bit
+	//  on it: set, and it hands that frame's position and velocity to the focus
+	//  manager; clear, and - if it was the one overriding - it puts the focus back
+	//  to the default. Both halves live in that one place, which is what makes the
+	//  bit sufficient on its own.
+	//
+	//  Setting that flag is exactly what camSwitchCamera and the game's own
+	//  debug free camera do, so this asks for a supported behaviour through its
+	//  own switch instead of writing the focus manager behind its back - and the
+	//  velocity the streamer prefetches along comes out right, which it would
+	//  not if we wrote a position on our own.
+	//
+	//  WHERE. The frame this writes to is the director's m_PostEffectFrame, the
+	//  one camBaseDirector::BaseUpdate clones out to the gameplay frame moments
+	//  later. camReplayDirector::PostUpdate re-clones it from m_Frame at the top
+	//  of every tick, so the bit never accumulates and never has to be cleared:
+	//  turning the option off simply stops setting it, and the game restores the
+	//  player-ped focus on the next frame all by itself.
+	void applyStreamingFocus(void* director)
+	{
+		static bool s_active = false;
+
+		const bool want = Config::get().streamingFocusOnCamera;
+
+		if (!director || !want)
+		{
+			if (s_active)
+			{
+				s_active = false;
+				logger::write("info",
+					"limits: streaming focus released - back to the player ped");
+			}
+			return;
+		}
+
+		// Cheap proof that this really is a camFrame before we OR into it. The
+		// flag word and the FOV are 0x60 apart inside the same struct, so a
+		// build that moved the frame moves both, and the FOV then reads as
+		// something outside the range camFrame::SetFov itself clamps to. Not
+		// paranoia about the game's data - a guard on OUR offset, the same one
+		// applyZoomLimit uses on the metadata block.
+		const float fov = *(const float*)((uint8_t*)director + rdirector::OFF_FrameFov);
+		if (!(fov >= 1.0f && fov <= 130.0f)) return;
+
+		*rdirector::frameFlags(director) |= rdirector::FRAME_ShouldOverrideStreamingFocus;
+
+		// The WRITE is unconditional; only the announcement waits for the
+		// editor. This detour runs during ordinary gameplay as well -
+		// camBaseDirector::BaseUpdate ticks every director every frame - and
+		// there the write is inert, because a director that is not rendering
+		// never has its frame cloned out to the one camInterface caches. Saying
+		// so at that point would claim a behaviour nobody is getting; gating the
+		// write itself on the mode global would instead make the feature depend
+		// on a signature it does not otherwise need.
+		if (!s_active && game::isEditModeActive())
+		{
+			s_active = true;
+			logger::write("info",
+				"limits: streaming focus follows the editor camera (frame flags %p)",
+				(void*)rdirector::frameFlags(director));
+		}
+	}
+
 	void install()
 	{
 		// Hooks are installed unconditionally so the in-editor menu can toggle
@@ -730,6 +814,13 @@ namespace limits
 		// inlined, which is the case on Enhanced.
 		logger::write("info", "limits: distance=%s",
 			Config::get().unlimitedCameraDistance ? "unlimited (metadata)" : "stock");
+
+		// Says "pending" for the same reason the restriction line below does:
+		// nothing is written until the director hands us a frame, so the state
+		// this reports is an intention. applyStreamingFocus logs the moment it
+		// actually takes, and again when it lets go.
+		logger::write("info", "limits: streaming focus=%s",
+			Config::get().streamingFocusOnCamera ? "camera (pending a frame)" : "stock (player ped)");
 
 		// Deliberately says "pending": the hook it describes cannot be placed
 		// until a clip is open, so claiming it here would be reporting an

@@ -211,9 +211,9 @@ struct Config
 	// after which the editor snaps back to the recorded camera and shows the
 	// out-of-range warning.
 	//
-	// Caveat worth knowing: the limit exists partly because the world is only
-	// streamed around the player. Far out you will see LOD pop and missing
-	// map — that is streaming, not this hook misbehaving.
+	// The leash exists partly because the world is only streamed around the
+	// player, so lifting it alone used to buy you LOD pop and missing map. That
+	// is what StreamingFocusOnCamera below is for; the two belong together.
 	bool  unlimitedCameraDistance = true;
 	float maxCameraDistance       = 20000.0f;
 
@@ -300,6 +300,29 @@ struct Config
 	// that frame), so a low value trades a five-second hang for a missing car
 	// for a moment. 0 restores stock.
 	float urgentModelLoadMs = 250.0f;
+	// Move the world's streaming and population focus onto the editor camera.
+	//
+	// Everything that decides what the engine keeps at full detail - map data
+	// and IPL cull boxes, the HD/LOD scene streamer, static collision, where
+	// peds and vehicles are populated, which peds get full AI and animation -
+	// centres on CFocusEntityMgr, and its default is the player ped. Fly the
+	// free camera any real distance and you are looking at a world that is
+	// still being streamed for someone standing where you took off.
+	//
+	// This asks the game to centre all of that on the camera instead, through
+	// the same camFrame flag its own player-switch and debug cameras use. See
+	// the block above limits::applyStreamingFocus for how, and for why nothing
+	// has to be restored when it goes off.
+	//
+	// ON by default, and paired with UnlimitedCameraDistance above: a camera
+	// that can go anywhere and a world that only exists in one place is half a
+	// feature. Turn it off to A/B, or if you specifically want to see what the
+	// clip looked like to the player.
+	//
+	// Costs what it sounds like it costs. The streamer now has to fetch the map
+	// around wherever you fly, so a fast move across the city does real work -
+	// that is the same work the game does when you drive across it.
+	bool  streamingFocusOnCamera = true;
 
 	// How many 4 MB blocks the replay RECORDER gets.
 	//
@@ -361,12 +384,13 @@ struct Config
 	// whereas a shot the push-off quietly ruined is not obvious at all.
 	bool  disableCameraCollision = true;
 
-	// Stop the editor raising its loading spinner for seeks. That spinner is
-	// what puts a ring in the middle of the screen when you scrub the timeline,
-	// and what gets burned into rendered frames, since a render seeks constantly.
-	// Scoped to the video-editor spinner source only, so save, script and cloud
-	// spinners still behave normally.
-	bool  hideEditorSpinner = true;
+	// HideEditorSpinner was here. It stopped the editor raising its seek spinner
+	// everywhere, not just in renders, and that was the wrong scope: the ring on
+	// a seek is stock behaviour people read as "the editor is working", so
+	// removing it from ordinary scrubbing only made a working editor look broken.
+	// The spinner is now suppressed for the duration of a capture and at no other
+	// time - which is the actual requirement, and not a preference - so there is
+	// nothing left for a key to select. An ini that still sets it is ignored.
 
 	// Widen the editor's zoom range. Stock is a 10x span (0.45x..4.50x); this
 	// replaces the camera metadata's MinFov/MaxFov with the values below.
@@ -997,6 +1021,7 @@ struct Config
 		alpha             = getFloat("Alpha", alpha);
 
 		unlimitedCameraDistance = getBool("UnlimitedCameraDistance", unlimitedCameraDistance);
+		streamingFocusOnCamera  = getBool("StreamingFocusOnCamera", streamingFocusOnCamera);
 		disableCameraCollision  = getBool("DisableCameraCollision", disableCameraCollision);
 
 		fastPrecache            = getBool("FastPrecache", fastPrecache);
@@ -1022,7 +1047,6 @@ struct Config
 		if (urgentModelLoadMs > 0.0f && urgentModelLoadMs < 16.0f) urgentModelLoadMs = 16.0f;
 		if (urgentModelLoadMs > gsig::MODELMGR_TIMEOUT_STOCK)
 			urgentModelLoadMs = gsig::MODELMGR_TIMEOUT_STOCK;
-		hideEditorSpinner        = getBool("HideEditorSpinner", hideEditorSpinner);
 		uncapZoom               = getBool("UncapZoom", uncapZoom);
 		zoomMinFov              = getFloat("ZoomMinFov", zoomMinFov);
 		zoomMaxFov              = getFloat("ZoomMaxFov", zoomMaxFov);

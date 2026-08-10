@@ -462,6 +462,14 @@ namespace rdirector
 		OFF_FramePosition      = 0x220, // float[3]         (row d)
 		OFF_FrameFov           = 0x250, // float, clamped 1..130 by the game
 
+		// camFrame::m_Flags (fwFlags16) - the LAST field of the frame, which is
+		// why 0x2B0 + 2, rounded up to the frame's 16-byte alignment, lands
+		// exactly on m_ActiveCamera at 0x2C0. The same word is reachable at
+		// camera+0xF0 on any camBaseCamera (its m_Frame is at +0x20), which is
+		// where the free camera's `|= 0x80` cut-orientation write was already
+		// confirmed on both builds - so the field is pinned from two directions.
+		OFF_FrameFlags         = 0x2B0, // u16
+
 		// camFrame DOF block. Offsets follow the camFrame member order; the
 		// layout self-validates because m_Fov falls on +0x250, which we had
 		// already confirmed independently, and the struct ends just before
@@ -502,6 +510,50 @@ namespace rdirector
 		OFF_CurrentMarkerIndex = 0x630, // s32
 		OFF_ShouldResetSmooth  = 0x66A, // bool
 	};
+
+	// =========================================================================
+	//  camFrame::eFlags - the bits that live in OFF_FrameFlags above
+	// =========================================================================
+	//  Only the one we use is listed. It is BIT4, and that is not taken on
+	//  trust: camSwitchCamera::ComputeBaseFrame sets it on a bare camFrame& and
+	//  compiles to, on the two retail images,
+	//
+	//    leg 0x205D51   movss [r8+0x74],  xmm1   ; near clip, after its clamp
+	//                   or    word [r8+0xD0],  0x10
+	//    enh 0x2505B5   movss [rsi+0x74], xmm0
+	//                   or    byte [rsi+0xD0], 0x10
+	//
+	//  which pins the flag word and the bit on both images at once, two fields
+	//  down from m_Fov at +0x70 - the offset OFF_FrameFov above was already built
+	//  on. Note the two differ in operand size, word vs byte; 0x10 is in the low
+	//  byte either way.
+	//
+	//  The Legacy address is 0x205D51, NOT the 0x095cf8 this comment was first
+	//  written with - that RVA is unrelated code. Re-derived by searching the
+	//  image for the instruction itself. Only the one occurrence of that exact
+	//  form is there, so the earlier "occurs exactly twice, in two adjacent
+	//  functions" is unconfirmed and should not be relied on.
+	//
+	//  What it DOES: camInterface::CacheFrame reads it off the frame that was
+	//  actually rendered, and hands that frame's position and velocity to
+	//  CFocusEntityMgr::SetPosAndVel. That manager is the world's streaming and
+	//  population centre - map data, IPL cull boxes, static collision, ped and
+	//  vehicle population, ped AI LOD all take their origin from it, and its
+	//  default is the player ped.
+	//
+	//  It is also self-restoring. CacheFrame remembers whether IT was the one
+	//  overriding, and calls SetDefault() on the first frame the flag is absent,
+	//  so "off" is simply not setting it - there is nothing to put back.
+	enum : uint16_t
+	{
+		FRAME_ShouldOverrideStreamingFocus = 0x0010, // BIT4
+		FRAME_HasCutOrientation            = 0x0080, // BIT7, for reference
+	};
+
+	inline uint16_t* frameFlags(void* self)
+	{
+		return (uint16_t*)((uint8_t*)self + OFF_FrameFlags);
+	}
 
 	inline float* framePosition(void* self)
 	{
