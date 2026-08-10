@@ -47,6 +47,14 @@ namespace render
 		// in slow motion and accumulate whatever is presented). See Config for
 		// why sliding exists and what it costs.
 		int   captureMode  = 0;
+
+		// The lens, for captureMode 2. Snapshotted like everything else here so
+		// a render keeps the aperture it started with.
+		float dofBokehSize = 0.15f;
+		int   dofQuality   = 12;
+		bool  dofAutofocus = true;
+		float dofFocusX    = 0.5f;
+		float dofFocusY    = 0.5f;
 	};
 
 	Settings& settings();
@@ -71,6 +79,13 @@ namespace render
 	void cancel();
 
 	bool  active();
+
+	// The render is in depth-of-field mode, i.e. it is itself driving the
+	// sessions. The two mutual-exclusion guards between the renderer and a
+	// session exist because two things seeking the replay produce neither a
+	// render nor a screenshot - which is still true of a session someone starts
+	// from the panel mid-render, and no longer true of the ones we ask for.
+	bool  drivingDofPass();
 	int   frameCount();
 	int   frameDone();
 	const char* outputFolder();

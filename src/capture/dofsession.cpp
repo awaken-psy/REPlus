@@ -8,12 +8,15 @@
 #include "main.h"
 #include "capture/dofsession.h"
 #include "capture/render.h"
+#include "capture/fxcapture.h"
+#include "game/worldprobe.h"
 #include "replay/marker.h"
 #include "replay/smoothblend.h"
 #include "utils/config.h"
 #include "utils/log.h"
 
 #include <atomic>
+#include <cmath>
 
 namespace dofsession
 {
@@ -448,7 +451,15 @@ namespace dofsession
 			// user's clip behind their back, and whether a shutter was in play
 			// depends on an add-on setting we do not track across sessions. A
 			// seek to where we already are is a no-op the engine drops.
-			if (s_haveT0) game::jumpProjectTo(s_t0, 0);
+			//
+			// EXCEPT while the renderer is driving the passes, where it owns the
+			// clock and this restore is actively wrong. The previous frame's
+			// session is torn down by the request for the NEXT one - i.e. just
+			// after the renderer has seeked forward - so restoring here yanked
+			// the playhead back and every frame rendered the same instant. The
+			// symptom was maddening: frame numbers advancing, distinct files
+			// being written, a clean progress line, and 26 identical pictures.
+			if (s_haveT0 && !render::drivingDofPass()) game::jumpProjectTo(s_t0, 0);
 
 			forceCollisionOff(false);
 			hideUi(false);
@@ -465,9 +476,25 @@ namespace dofsession
 	// synchronously to decide whether to open a session at all, and it surfaces
 	// each code as its own message.
 	// -------------------------------------------------------------------------
+	// Refusals are logged, once per distinct reason.
+	//
+	// The add-on turns any non-zero code into one word - "failed" - and the
+	// renderer aborts on it, so a session refused for one of four quite
+	// different reasons produced one indistinguishable line and a dead render.
+	int refuse(int rc, const char* why)
+	{
+		static int saidMask = 0;
+		if (!(saidMask & (1 << rc)))
+		{
+			saidMask |= (1 << rc);
+			logger::write("info", "dof: session refused - %s (rc %d)", why, rc);
+		}
+		return rc;
+	}
+
 	int requestStart(uint8_t type)
 	{
-		if (s_active.load()) return RC_ALREADY_ACTIVE;
+		if (s_active.load()) return refuse(RC_ALREADY_ACTIVE, "one is already running");
 
 		// Not our territory: hand the whole session to a real camera tool if one
 		// is loaded, rather than declining and leaving the user with a feature
@@ -486,14 +513,29 @@ namespace dofsession
 
 		// Our own renderer owns the clock and the HUD while it runs; two things
 		// seeking the replay would produce neither a render nor a screenshot.
-		if (render::active()) return RC_ALREADY_ACTIVE;
+		//
+		// Unless the render is the one asking. In depth-of-field mode it drives a
+		// session per output frame, so refusing here would refuse the render its
+		// own frames - the guard is against an UNRELATED session, which is still
+		// exactly what it catches.
+		if (render::active() && !render::drivingDofPass())
+			return refuse(RC_ALREADY_ACTIVE, "a render owns the clock");
 
-		if (!game::addr_g_ReplayTimeMs) return RC_FEATURE_UNAVAILABLE;
+		if (!game::addr_g_ReplayTimeMs)
+			return refuse(RC_FEATURE_UNAVAILABLE, "no replay clock resolved");
 
 		// Playback must be parked. A session integrates ONE instant, so a clip
 		// running underneath it would smear the whole shot rather than the
 		// shutter interval we asked for.
-		if (s_playbackRunning.load()) return RC_PATH_PLAYING;
+		//
+		// Again, not when the render is the one asking. This flag is sampled by
+		// watching whether the replay clock moves on its own - and between
+		// depth-of-field frames the renderer SEEKS, which looks exactly like
+		// playback to that test. It refused a pass mid-render and killed a
+		// twenty-five minute job two frames in. The renderer owns the clock
+		// here; its seeks are not a clip running underneath us.
+		if (s_playbackRunning.load() && !render::drivingDofPass())
+			return refuse(RC_PATH_PLAYING, "the clip is playing - park the playhead");
 
 		s_active.store(true);
 		s_startSeq.fetch_add(1);
@@ -658,7 +700,8 @@ namespace dofsession
 		// unambiguous: the editor closing takes the camera with it, and a render
 		// starting means something else now owns the clock.
 		if (!game::isEditModeActive()) { s_active.store(false); endOnMainThread("editor closed"); return; }
-		if (render::active())          { s_active.store(false); endOnMainThread("render started"); return; }
+		if (render::active() && !render::drivingDofPass())
+		                               { s_active.store(false); endOnMainThread("render started"); return; }
 
 		if (GetTickCount() - s_lastActivity.load() > kIdleTimeoutMs)
 		{
@@ -804,6 +847,175 @@ namespace dofsession
 		s_servicedSeq.store(moveSeq, std::memory_order_release);
 
 		++s_sample;
+	}
+
+	// Status codes handed to the add-on. Mirrored in its afStatus handling.
+	constexpr uint32_t kAfOk       = 0;
+	constexpr uint32_t kAfNoHit    = 1;
+	constexpr uint32_t kAfNoCamera = 2;
+
+	// How far to look. Past this the subject is beyond any focus a lens with a
+	// bokeh this size can separate anyway, and the disparity has collapsed to
+	// noise - so a longer ray buys nothing and costs a longer query.
+	constexpr float kAfRangeM = 400.0f;
+
+	// =========================================================================
+	//  Autofocus
+	// =========================================================================
+	//  The lens angle. The game stores a VERTICAL fov and clamps it to
+	//  1..130 on that axis, while the disparity the add-on wants is horizontal,
+	//  so it has to be widened by the captured aspect:
+	//        hfov = 2*atan(tan(vfov/2) * aspect)
+	//  and tan(hfov/2) is what goes across, so no angle unit crosses the
+	//  boundary and the aspect is applied where the captured size is known.
+	//
+	//  The distance comes from a line probe along the focus point, and the two
+	//  are reported together on purpose: an angle from one frame paired with a
+	//  distance from another would be wrong in a way nothing downstream could
+	//  detect.
+	//
+	//  There used to be an AutofocusTestDistance ini key here, answering with a
+	//  typed-in number so the exchange, the formula and the sign could be proven
+	//  before the query existed. It did that - the formula was confirmed against
+	//  a hand-dialled focus - and it is gone, because it OVERRODE the query. Left
+	//  in, a stale value in someone's ini would pin focus to a fixed distance and
+	//  read exactly like autofocus being broken.
+	void autofocusTick(void* self)
+	{
+		float px = 0.5f, py = 0.5f;
+		if (!self || !fxcapture::autofocusWanted(&px, &py)) return;
+
+		const float aspect = fxcapture::capturedAspect();
+		const float vfovDeg = *(const float*)((uint8_t*)self + rdirector::OFF_FrameFov);
+
+		// Same range the engine itself clamps the fov to. A frame outside it is
+		// not a frame we recognise, and the tangent of a garbage angle would be
+		// answered with total confidence.
+		//
+		// Reported separately, once each. Both of these arrive at the add-on as
+		// the same "no camera" and read there as "no tool is measuring" - which
+		// is indistinguishable from the tool not being wired up at all. It cost
+		// a test round to tell those apart once already.
+		if (aspect <= 0.0f)
+		{
+			static bool said = false;
+			if (!said)
+			{
+				said = true;
+				logger::write("info",
+					"dof: autofocus has no frame size to work from yet, so no aspect "
+					"and no horizontal fov. The add-on reports this as 'no tool is "
+					"measuring'.");
+			}
+			fxcapture::autofocusAnswer(0.0f, 0.0f, kAfNoCamera);
+			return;
+		}
+		if (!(vfovDeg >= 1.0f && vfovDeg <= 130.0f))
+		{
+			static bool said = false;
+			if (!said)
+			{
+				said = true;
+				logger::write("info",
+					"dof: autofocus read a fov of %.2f, outside the engine's own "
+					"1..130 - not a frame we recognise, so no answer.", vfovDeg);
+			}
+			fxcapture::autofocusAnswer(0.0f, 0.0f, kAfNoCamera);
+			return;
+		}
+
+		const float halfV = vfovDeg * 0.5f * 3.14159265358979f / 180.0f;
+		const float tanHalfH = tanf(halfV) * aspect;
+
+		if (!worldprobe::available())
+		{
+			fxcapture::autofocusAnswer(0.0f, tanHalfH, kAfNoHit);
+			return;
+		}
+
+		// Build the ray for the focus point.
+		//
+		// The point is in 0..1 across and down the frame, so it is turned into
+		// tangents on the two axes and carried along the camera's own basis.
+		// Note the Y flip: the point comes from a UI where 0 is the TOP, and up
+		// is +1 in the world.
+		const float* right = (const float*)((uint8_t*)self + rdirector::OFF_FrameMatrixA);
+		const float* fwd   = (const float*)((uint8_t*)self + rdirector::OFF_FrameMatrixB);
+		const float* up    = (const float*)((uint8_t*)self + rdirector::OFF_FrameMatrixC);
+		const float* pos   = (const float*)((uint8_t*)self + rdirector::OFF_FramePosition);
+
+		const float tx = (px * 2.0f - 1.0f) * tanHalfH;
+		const float ty = (1.0f - py * 2.0f) * tanf(halfV);
+
+		float dir[3], start[3], end[3];
+		for (int i = 0; i < 3; ++i)
+		{
+			dir[i]   = fwd[i] + right[i] * tx + up[i] * ty;
+			start[i] = pos[i];
+		}
+
+		float len = sqrtf(dir[0]*dir[0] + dir[1]*dir[1] + dir[2]*dir[2]);
+		if (!(len > 0.0001f))
+		{
+			fxcapture::autofocusAnswer(0.0f, tanHalfH, kAfNoCamera);
+			return;
+		}
+		for (int i = 0; i < 3; ++i)
+		{
+			dir[i] /= len;
+			end[i]  = start[i] + dir[i] * kAfRangeM;
+		}
+
+		worldprobe::Hit hit;
+		const bool got = worldprobe::line(start, end, &hit);
+
+		// Logged for a MISS as well as a hit, which the first version did not do -
+		// and the misses were the informative half. "Nothing under the focus
+		// point" can mean the engine refused the descriptor, ran and found
+		// nothing, or filled entries we then failed to read; submitted/count/t
+		// separate those three.
+		if (Config::get().splineDebugLog)
+		{
+			static float lastPx = -1.0f, lastPy = -1.0f;
+			static int   said   = 0;
+			if ((px != lastPx || py != lastPy) && said < 60)
+			{
+				lastPx = px; lastPy = py; ++said;
+				logger::write("info",
+					"autofocus: pt %.3f,%.3f | tx %.4f ty %.4f | dir %.3f %.3f %.3f "
+					"| submitted %d count %u firstT %.5f | t %.5f ray %.2f | hit %.1f %.1f %.1f",
+					px, py, tx, ty, dir[0], dir[1], dir[2],
+					hit.submitted ? 1 : 0, hit.count, hit.firstT,
+					hit.t, hit.t * kAfRangeM, hit.x, hit.y, hit.z);
+			}
+		}
+
+		if (!got)
+		{
+			// Sky, or further than we look. Reported rather than guessed - the
+			// add-on holds its last good focus, which is far less visible than a
+			// lurch to infinity every time the point crosses the horizon.
+			fxcapture::autofocusAnswer(0.0f, tanHalfH, kAfNoHit);
+			return;
+		}
+
+		// Depth ALONG THE VIEW AXIS, not the length of the ray.
+		//
+		// The two are identical through the centre of the frame and diverge
+		// everywhere else - and "everywhere else" is the whole point of a movable
+		// focus point. Getting this wrong focuses slightly far at the edges, by
+		// exactly the cosine that a wrong answer is hardest to spot by eye.
+		const float z = (hit.x - pos[0]) * fwd[0] +
+		                (hit.y - pos[1]) * fwd[1] +
+		                (hit.z - pos[2]) * fwd[2];
+
+		if (!(z > 0.05f))
+		{
+			fxcapture::autofocusAnswer(0.0f, tanHalfH, kAfNoHit);
+			return;
+		}
+
+		fxcapture::autofocusAnswer(z, tanHalfH, kAfOk);
 	}
 
 	void applyToFrame(void* self)

@@ -29,7 +29,11 @@ namespace fxcapture
 		// rendering at the same time: one runs in free roam, one in the editor.
 		const char* kMappingName = "Local\\SimpleCameraFxCapture";
 		constexpr uint32_t kMagic   = 0x53434658; // 'SCFX'
-		constexpr uint32_t kVersion = 6;
+		// 7 added the autofocus fields. Nothing reads this to gate behaviour -
+		// the fields are appended, so an older add-on simply never looks at them
+		// and the capture protocol is unchanged. It is here to be seen in a log
+		// when a pair does turn out to be mismatched.
+		constexpr uint32_t kVersion = 9;
 
 		// One place, always, next to the exe. Every render is a numbered
 		// subfolder inside it.
@@ -337,6 +341,85 @@ namespace fxcapture
 		if (b < 0.0f) b = 0.0f;
 		if (b > 0.99f) b = 0.99f;
 		s_block->highlightBoost = b;
+	}
+
+	bool autofocusWanted(float* pointX, float* pointY)
+	{
+		if (!s_block || s_block->afEnabled == 0) return false;
+
+		// Clamped rather than trusted. This crosses a process boundary from a
+		// UI that can be edited while we read it, and it goes on to pick a
+		// direction to fire a world query in.
+		float x = s_block->afPointX;
+		float y = s_block->afPointY;
+		if (!(x >= 0.0f && x <= 1.0f)) x = 0.5f;
+		if (!(y >= 0.0f && y <= 1.0f)) y = 0.5f;
+
+		if (pointX) *pointX = x;
+		if (pointY) *pointY = y;
+		return true;
+	}
+
+	void autofocusAnswer(float distance, float tanHalfHFov, uint32_t status)
+	{
+		if (!s_block) return;
+
+		s_block->afDistance    = distance;
+		s_block->afTanHalfHFov = tanHalfHFov;
+		s_block->afStatus      = status;
+
+		// Last, and after the values it describes: the add-on reads this to
+		// decide the rest is fresh, so bumping it first would hand over the
+		// previous frame's numbers under a new id.
+		++s_block->afResultId;
+	}
+
+	float capturedAspect()
+	{
+		if (!s_block || s_block->width == 0 || s_block->height == 0) return 0.0f;
+		return (float)s_block->width / (float)s_block->height;
+	}
+
+	uint32_t dofRequest(float shutterMs, float bokehSize, int quality,
+	                    bool autofocus, float focusX, float focusY)
+	{
+		if (!s_block) return 0;
+
+		s_block->dofShutterMs = shutterMs;
+
+		// Written BEFORE the counter, always. The add-on reads them when it sees
+		// a new id, so publishing the id first would hand it the previous
+		// frame's lens for one pass - and one wrong frame in a 26-frame render
+		// is exactly the kind of thing that gets blamed on the game.
+		s_block->dofBokehSize = bokehSize;
+		s_block->dofQuality   = (uint32_t)quality;
+		s_block->dofAutofocus = autofocus ? 1u : 0u;
+		s_block->dofFocusX    = focusX;
+		s_block->dofFocusY    = focusY;
+
+		// Never 0 - that value is reserved for "no pass wanted", and is how a
+		// render says it is over. A counter that wrapped onto it would read as a
+		// teardown in the middle of a sequence.
+		uint32_t next = s_block->dofSeq + 1;
+		if (next == 0) next = 1;
+		s_block->dofSeq = next;
+		return next;
+	}
+
+	bool dofDone(uint32_t seq)
+	{
+		return s_block && seq != 0 && s_block->dofDoneSeq == seq;
+	}
+
+	uint32_t dofStatus()
+	{
+		return s_block ? s_block->dofStatus : 0;
+	}
+
+	void dofEnd()
+	{
+		if (!s_block) return;
+		s_block->dofSeq = 0;
 	}
 
 	void setChannelOrder(int order)

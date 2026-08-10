@@ -49,6 +49,72 @@ struct FxCaptureBlock
 	                         // picks PNG vs JPEG from the .png / .jpg extension
 	uint32_t channelOrder;   // 0 = Auto (addon detects the back-buffer format),
 	                         // 1 = force RGBA (no swap), 2 = force BGRA (swap R/B)
+
+	// --- autofocus for the depth-of-field session (v7) --------------------
+	//
+	// Appended, like channelOrder before it, so every earlier offset is
+	// unchanged and a mismatched pair still agrees about the capture protocol.
+	//
+	// The split is forced by what each side can see. Only the ASI can ask the
+	// world what is in front of the lens; only the add-on knows maxBokehSize
+	// and owns the focus value. So the ASI reports what it MEASURED - a
+	// distance and the lens angle that goes with it - and the add-on converts
+	// that to its own disparity units. Deliberately not the other way round:
+	// maxBokehSize then never crosses the boundary, and dragging it in the
+	// panel re-derives focus with no round trip to wait for.
+	uint32_t afEnabled;      // addon -> ASI: 1 while the DOF panel wants autofocus
+	float    afPointX;       // addon -> ASI: focus point across the frame, 0..1
+	float    afPointY;       // addon -> ASI: and down it, 0..1
+
+	uint32_t afResultId;     // ASI -> addon: bumped on every answer written
+	uint32_t afStatus;       // ASI -> addon: 0 = ok, 1 = nothing hit,
+	                         //               2 = no camera / not in the editor
+	float    afDistance;     // ASI -> addon: metres to the hit ALONG THE VIEW
+	                         // AXIS - not ray length; the two differ off-centre
+	float    afTanHalfHFov;  // ASI -> addon: tan(hfov/2) for the probed frame.
+	                         // Sent pre-computed so the vertical-to-horizontal
+	                         // conversion happens where the captured aspect is
+	                         // already known, and so no angle unit crosses.
+
+	// --- a depth-of-field pass per rendered frame (v8) ---------------------
+	//
+	// The renderer and a DoF session already do the same thing: accumulate many
+	// samples into one image. They differ only in what they vary - the renderer
+	// steps TIME, a session sweeps the APERTURE (and time too, through the timed
+	// entry point). So this is not a third accumulator; it is the renderer
+	// asking the add-on to produce one frame instead of doing it itself.
+	//
+	// What makes it cheap to wire: a finished session leaves its accumulated
+	// image ON SCREEN. So the ordinary capture request that follows grabs it
+	// with no new file path, format or buffer anywhere.
+	uint32_t dofSeq;         // ASI -> addon: bumped to ask for one DoF pass
+	float    dofShutterMs;   // ASI -> addon: the renderer owns the shutter here,
+	                         // so the panel's own value is not consulted. One
+	                         // shutter, in the place the render is configured.
+
+	uint32_t dofDoneSeq;     // addon -> ASI: echoes dofSeq once the pass has
+	                         // finished and the image is on screen
+	uint32_t dofStatus;      // addon -> ASI: 0 idle, 1 running, 2 done, 3 failed.
+	                         // A pass takes tens of seconds, so "still working"
+	                         // has to be distinguishable from "died" - otherwise
+	                         // the render's own watchdog is the thing that breaks.
+
+	// --- the lens, pushed by the renderer (v9) -----------------------------
+	//
+	// Read once when a pass starts, never polled, so the panel stays
+	// authoritative at every other moment and there is no instant where both
+	// sides own a value. That one-way-at-a-defined-moment rule is the whole
+	// reason these can live in two places without drifting.
+	//
+	// Only what is a per-shot DECISION moves here. The bokeh SHAPE - vertices,
+	// rounding, rotation, aberration, fringe - stays in the panel, because you
+	// pick it by looking at a live image and a number typed into a text menu
+	// cannot be judged.
+	float    dofBokehSize;   // aperture diameter, the main creative control
+	uint32_t dofQuality;     // ring count; sample total follows from it
+	uint32_t dofAutofocus;   // 1 = measure focus in the world each frame
+	float    dofFocusX;      // where to measure, across the frame 0..1
+	float    dofFocusY;      // and down it
 };
 #pragma pack(pop)
 
@@ -93,6 +159,45 @@ namespace fxcapture
 	void setQuality(int quality);         // JPEG only, 1..100
 	void setHighlightBoost(float boost);  // 0..~1
 	void setChannelOrder(int order);      // 0 auto / 1 RGBA / 2 BGRA
+
+	// --- autofocus ------------------------------------------------------------
+	// The add-on's depth-of-field panel asks for focus; we answer with what is
+	// in front of the lens. Kept here rather than exposing the block, which is
+	// private to this file on purpose.
+
+	// True while the add-on wants autofocus, with where in the frame it wants
+	// focused - 0..1 across and down.
+	bool autofocusWanted(float* pointX, float* pointY);
+
+	// The answer. distance is metres along the VIEW AXIS (not ray length) and
+	// tanHalfHFov is the horizontal half-angle of the frame it was measured in.
+	// status: 0 = ok, 1 = nothing hit, 2 = no camera.
+	//
+	// Bumps a counter rather than relying on the value changing, so a repeated
+	// measurement still reads as a fresh answer - which is what a stationary
+	// subject produces.
+	void autofocusAnswer(float distance, float tanHalfHFov, uint32_t status);
+
+	// The captured frame's aspect, or 0 if the add-on has not reported a size
+	// yet. Needed to turn the game's VERTICAL fov into a horizontal one.
+	float capturedAspect();
+
+	// --- a depth-of-field pass per rendered frame ----------------------------
+	// Ask the add-on to accumulate one frame across the aperture instead of the
+	// renderer accumulating it across time. Returns the request id to wait on.
+	uint32_t dofRequest(float shutterMs, float bokehSize, int quality,
+	                    bool autofocus, float focusX, float focusY);
+
+	// Has that request finished and left its image on screen?
+	bool dofDone(uint32_t seq);
+
+	// 0 idle, 1 running, 2 done, 3 failed. Separates "a 50-second frame is still
+	// going" from "the pass died", which a timeout alone cannot.
+	uint32_t dofStatus();
+
+	// Tear any pass down. Idempotent - the end of a render, an abort and a
+	// cancel all come through here.
+	void dofEnd();
 
 	// Create a fresh auto-numbered output folder for a sequence render.
 	// `base` may be null or empty, in which case a single

@@ -19,6 +19,9 @@ namespace game
 	extern uintptr_t addr_g_ReplayTimeMs;        // float, CReplayMgr current time relative ms
 	extern uintptr_t addr_GetMaxDistanceFromPlayer; // camReplayDirector::GetMaxDistanceAllowedFromPlayer(bool)
 	extern uintptr_t addr_UpdateCollision;       // camReplayFreeCamera::UpdateCollision(initialPos, cameraPos)
+	extern uintptr_t addr_ShapeTestManager;      // WorldProbe shape-test manager (a fixed global)
+	extern uintptr_t addr_ShapeTestSubmit;       // SubmitTest(manager, desc, 0) -> bool
+	extern uintptr_t addr_ShapeTestVTable;       // the probe descriptor's vtable
 	extern uintptr_t addr_ComputeSafePosition;   // camReplayFreeCamera::ComputeSafePosition(entity, cameraPos)
 	extern uintptr_t addr_ProfanityGetStatus;    // netProfanityFilter::GetStatusForRequest
 	extern uintptr_t addr_ReplayJumpTo;          // CReplayMgrInternal::JumpTo(float ms, u32 opts)
@@ -185,7 +188,7 @@ namespace game
 	// what makes a slow-motion section render as slow motion rather than at
 	// uniform speed. Returns its input unchanged when the controller is not
 	// available, which is the old behaviour rather than a wrong seek.
-	float dilatedToNonDilatedMs(float dilatedProjectMs);
+	float clipRealOffsetToClockMs(float realOffsetIntoClipMs);
 
 	// The inverse. Sliding capture lets the clip play and watches the clock, so
 	// what it observes is authored time and has to be mapped onto the output

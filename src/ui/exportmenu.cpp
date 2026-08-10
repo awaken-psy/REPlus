@@ -93,6 +93,11 @@ namespace exportmenu
 			// Shutter before knowing whether it is exact or approximate is
 			// reading it in the wrong order.
 			ROW_CAPTURE,      // renderCaptureMode
+			ROW_DOF_SIZE,     // renderDofBokehSize   - DepthOfField mode only
+			ROW_DOF_QUALITY,  // renderDofQuality
+			ROW_DOF_AF,       // renderDofAutofocus
+			ROW_DOF_FX,       // renderDofFocusX
+			ROW_DOF_FY,       // renderDofFocusY
 			ROW_SAMPLES,      // renderSamples
 			ROW_SHUTTER,      // renderShutter
 			ROW_HIGHLIGHT,    // renderHighlight
@@ -314,6 +319,11 @@ namespace exportmenu
 			case ROW_OUTPUT:    return "Output";
 			case ROW_FPS:       return "Frame Rate";
 			case ROW_CAPTURE:   return "Capture Mode";
+			case ROW_DOF_SIZE:  return "Aperture";
+			case ROW_DOF_QUALITY: return "Bokeh Quality";
+			case ROW_DOF_AF:    return "Autofocus";
+			case ROW_DOF_FX:    return "Focus Point X";
+			case ROW_DOF_FY:    return "Focus Point Y";
 			case ROW_SAMPLES:   return "Motion Blur";
 			case ROW_SHUTTER:   return "Shutter";
 			case ROW_HIGHLIGHT: return "Highlight Boost";
@@ -359,12 +369,34 @@ namespace exportmenu
 				snprintf(buf, sizeof(buf), "%g fps", c.renderFps);
 				return buf;
 
+			case ROW_DOF_SIZE:
+				snprintf(buf, sizeof(buf), "%.3f", c.renderDofBokehSize);
+				return buf;
+			case ROW_DOF_QUALITY:
+				snprintf(buf, sizeof(buf), "%d rings", c.renderDofQuality);
+				return buf;
+			case ROW_DOF_AF:
+				return c.renderDofAutofocus ? "On" : "Off";
+			case ROW_DOF_FX:
+				snprintf(buf, sizeof(buf), "%.2f", c.renderDofFocusX);
+				return buf;
+			case ROW_DOF_FY:
+				snprintf(buf, sizeof(buf), "%.2f", c.renderDofFocusY);
+				return buf;
+
 			case ROW_CAPTURE:
 				// Named the way Render.ini names them, so the row and the key
 				// cannot be mistaken for two different settings.
-				return c.renderCaptureMode == 1 ? "Sliding" : "Walking";
+				return c.renderCaptureMode == 2 ? "Depth of Field"
+				     : c.renderCaptureMode == 1 ? "Sliding" : "Walking";
 
 			case ROW_SAMPLES:
+				// "Off" would be a lie in Depth of Field mode. The renderer's own
+				// sub-sample loop is off, but the exposure is not: each aperture
+				// sample sits at a different moment in the shutter, so a pass
+				// carries motion blur as well as bokeh. The row is greyed because
+				// the NUMBER does nothing, not because the effect is absent.
+				if (c.renderCaptureMode == 2) return "From aperture";
 				if (c.renderSamples <= 1) return "Off";
 				snprintf(buf, sizeof(buf), "%d samples", c.renderSamples);
 				return buf;
@@ -492,6 +524,43 @@ namespace exportmenu
 				       "23.976 and 24 are the film rates; 25 and 50 are PAL. Higher rates "
 				       "cost proportionally more render time.";
 
+			case ROW_DOF_SIZE:
+				return "How wide the lens opens, in world units. This is the whole "
+				       "creative control: bigger means shallower focus and larger "
+				       "bokeh, and it costs nothing extra to render.\n\n"
+				       "What it DOES cost is samples. The defocus disc is filled by "
+				       "discrete points, so a wide aperture at a low Bokeh Quality "
+				       "shows each highlight as a ring of separate dots rather than "
+				       "a smooth circle. Open it up and raise quality together.";
+
+			case ROW_DOF_QUALITY:
+				return "Rings of samples across the aperture. The total sample count "
+				       "grows with it, and so does the render time - close to "
+				       "proportionally.\n\n"
+				       "Set it by the blur you are asking for, not by taste. A "
+				       "defocused highlight becomes exactly as many dots as there are "
+				       "samples, so a shot with small speculars out of focus needs far "
+				       "more than one without. Smooth surfaces converge quickly; bright "
+				       "points are what force the number up.";
+
+			case ROW_DOF_AF:
+				return "Measure focus in the world every frame, at the focus point "
+				       "below, so it follows the subject through the shot.\n\n"
+				       "The measurement is a ray fired into the scene, not a guess "
+				       "from the depth buffer, so it lands on the surface you are "
+				       "actually pointing at - and it is a DEPTH, not a spot: "
+				       "everything the same distance away comes out sharp too.\n\n"
+				       "Off leaves focus wherever the add-on's panel last set it.";
+
+			case ROW_DOF_FX:
+			case ROW_DOF_FY:
+				return "Where in the frame to measure focus. 0.5, 0.5 is the centre; "
+				       "0,0 is the top left.\n\n"
+				       "Put it on the part that must be sharp - a face rather than the "
+				       "middle of a body, or the plane lands somewhere behind the eyes. "
+				       "A crosshair shows where it is while a depth-of-field session "
+				       "is open in ReShade.";
+
 			case ROW_CAPTURE:
 				// Contrasts BOTH modes rather than describing the selected one,
 				// for the state-free reason above - and it is the better shape
@@ -510,9 +579,31 @@ namespace exportmenu
 				       "the two: it needs Samples/Shutter frames where Walking needs a "
 				       "settle frame per sample as well - one to redraw at the seeked "
 				       "time, one to capture it. At a 360-degree shutter that is roughly "
-				       "2x; at 180 the two are level, and below that Walking wins.";
+				       "2x; at 180 the two are level, and below that Walking wins.\n\n"
+				       "Depth of Field is Walking with a real lens. Instead of one "
+				       "image per sub-frame, the ReShade add-on accumulates each output "
+				       "frame across an actual aperture, so defocus comes from geometry "
+				       "rather than from blurring a finished picture - foreground and "
+				       "background occlude each other correctly and highlights bloom into "
+				       "the aperture's own shape. Focus is measured in the world, so it "
+				       "follows the subject through the shot.\n\n"
+				       "It is by far the slowest: every frame is a whole aperture sweep, "
+				       "which is tens of seconds, so a shot measured in minutes elsewhere "
+				       "is measured in hours here. Samples is ignored - the aperture does "
+				       "the sampling - and Shutter still sets the exposure.";
 
 			case ROW_SAMPLES:
+				if (c.renderCaptureMode == 2)
+					return "Not used in Depth of Field mode, and there is still motion "
+					       "blur.\n\n"
+					       "Every sample across the aperture also sits at a different "
+					       "moment inside the shutter, so one pass integrates the lens "
+					       "and the exposure together. Sub-sampling on top would render "
+					       "the same instants twice for no gain - which is exactly what "
+					       "it did before this row was pinned.\n\n"
+					       "Bokeh Quality sets how many samples there are; Shutter sets "
+					       "how far across time they are spread.";
+
 				return "Sub-frames averaged into each output frame. Real accumulation "
 				       "blur: correct on rotation, on transparency and on everything a "
 				       "screen-space filter cannot see.\n\n"
@@ -530,6 +621,15 @@ namespace exportmenu
 				       "and has no such floor.";
 
 			case ROW_SHUTTER:
+				if (c.renderCaptureMode == 2)
+					return "How much of each frame interval the shutter is open. In Depth "
+					       "of Field mode this is what produces the motion blur: the "
+					       "aperture samples are spread across this window, so 1.0 smears "
+					       "a full frame of movement into every picture and 0.25 gives a "
+					       "crisp, staccato look.\n\nIt costs nothing either way - the "
+					       "sample count is unchanged, only where in time the samples land. "
+					       "The add-on's own Shutter is ignored while a render is driving; "
+					       "this is the one that applies.";
 				// Depends on MOTION BLUR, not on itself - so the pane is correct
 				// as soon as you arrive here, which is the rule in rowHelp's note.
 				if (c.renderSamples <= 1)
@@ -546,7 +646,14 @@ namespace exportmenu
 				       "sample count says. No effect while Motion Blur is Off.";
 
 			case ROW_HIGHLIGHT:
-				if (c.renderSamples <= 1)
+				if (c.renderCaptureMode == 2)
+					return "Keeps speculars bright through accumulation instead of "
+					       "letting the average wash them down to grey.\n\nIn Depth of "
+					       "Field mode it is applied by the aperture pass rather than by "
+					       "the renderer - the same job in a different place. A defocused "
+					       "highlight is exactly where averaging costs the most brightness, "
+					       "so it is worth more here than anywhere.\n\nThe highlight GAMMA "
+					       "that pairs with it stays in ReShade's panel.";
 					return "Inactive: this lifts highlights WHILE sub-samples are "
 					       "accumulated, and with Motion Blur off nothing is accumulated - "
 					       "the frame is captured and written straight out.\n\n"
@@ -665,13 +772,64 @@ namespace exportmenu
 				break;
 			}
 
+			case ROW_DOF_SIZE:
+			{
+				// Multiplicative steps: aperture is perceived in stops, so a
+				// fixed increment is far too coarse at 0.05 and far too fine
+				// at 5.
+				float v = c.renderDofBokehSize * (delta > 0 ? 1.25f : 0.8f);
+				if (v < 0.005f) v = 0.005f;
+				if (v > 5.0f)   v = 5.0f;
+				c.renderDofBokehSize = v;
+				c.writeRenderFloat("RenderDofBokehSize", v);
+				break;
+			}
+
+			case ROW_DOF_QUALITY:
+			{
+				const int v = clampi(c.renderDofQuality + (delta > 0 ? 1 : -1), 1, 60);
+				c.renderDofQuality = v;
+				c.writeRenderInt("RenderDofQuality", v);
+				break;
+			}
+
+			case ROW_DOF_AF:
+				c.renderDofAutofocus = delta > 0;
+				c.writeRenderBool("RenderDofAutofocus", c.renderDofAutofocus);
+				break;
+
+			case ROW_DOF_FX:
+			{
+				float v = c.renderDofFocusX + (delta > 0 ? 0.02f : -0.02f);
+				if (v < 0.0f) v = 0.0f;
+				if (v > 1.0f) v = 1.0f;
+				c.renderDofFocusX = v;
+				c.writeRenderFloat("RenderDofFocusX", v);
+				break;
+			}
+
+			case ROW_DOF_FY:
+			{
+				float v = c.renderDofFocusY + (delta > 0 ? 0.02f : -0.02f);
+				if (v < 0.0f) v = 0.0f;
+				if (v > 1.0f) v = 1.0f;
+				c.renderDofFocusY = v;
+				c.writeRenderFloat("RenderDofFocusY", v);
+				break;
+			}
+
 			case ROW_CAPTURE:
-				c.renderCaptureMode = delta > 0 ? 1 : 0;
+				// Three-way now, so it CYCLES rather than picking by sign. Depth
+				// of field is deliberately last: it is the one that turns a
+				// minutes-long render into an hours-long one, and it should not
+				// be what a single nudge past Walking lands on.
+				c.renderCaptureMode = (c.renderCaptureMode + (delta > 0 ? 1 : 2)) % 3;
 				// Written as the WORD, not as 0/1: that is what the loader reads
 				// (and it accepts Sliding / Slide / Play), and a Render.ini that
 				// suddenly said "RenderCaptureMode=1" where it used to say
 				// "Sliding" would look like a different key.
 				c.writeRenderStr("RenderCaptureMode",
+					c.renderCaptureMode == 2 ? "DepthOfField" :
 					c.renderCaptureMode == 1 ? "Sliding" : "Walking");
 				break;
 
@@ -740,6 +898,31 @@ namespace exportmenu
 		// whichever conform you pick into assemble.txt. A sequence with a wav
 		// beside it is a perfectly good deliverable - arguably the better one,
 		// since the sound survives however you choose to encode later.
+		// Which rows EXIST. Fixed, and it has to be.
+		//
+		// The obvious move is to emit only the rows that apply - and it does not
+		// work, because the menu is rebuilt when the screen is ENTERED, not when
+		// a value on it changes. Switch Capture Mode with left/right and the row
+		// set is whatever the previous mode needed: the lens rows sitting under
+		// Walking, Motion Blur gone. Worse than greying, because the stale rows
+		// look authoritative.
+		//
+		// So the set is constant and relevance is shown by greying. That fixes
+		// the budget at 13: the column shows 16 and the screen carries 3 stock
+		// rows. Colour Channels is what gives way - see below.
+		bool rowVisible(int row)
+		{
+			// The one row dropped to make the lens fit.
+			//
+			// It is the only one here that is not a creative decision: you come
+			// to it because a render came out with red and blue swapped, and
+			// having done that once you never touch it again. It is still in
+			// Render.ini and in RE+ Render Settings, which is where a fix-it
+			// setting can live without costing a line that a per-shot control
+			// needs. Everything else on this screen is used every session.
+			return row != ROW_CHANNELS;
+		}
+
 		bool rowEnabled(int row)
 		{
 			const Config& c = Config::get();
@@ -757,7 +940,40 @@ namespace exportmenu
 			//
 			// Leaving them steppable is the same lie the stock encoder rows tell
 			// when the renderer owns Export, and it gets the same treatment.
+			// Depth of Field decides both of these for itself, and in opposite
+			// directions - so they are stated here rather than falling out of the
+			// sample count, which only kept Shutter alive by accident.
+			//
+			// SHUTTER IS LIVE, and is the control that matters: it sets how far
+			// across time the aperture samples are spread, which is where the
+			// motion blur in that mode comes from.
+			//
+			// HIGHLIGHT BOOST IS NOT. It belongs to the renderer's own linear
+			// accumulation, and a depth-of-field pass asks for a single capture
+			// of an already-accumulated image - the add-on takes its
+			// sampleCount <= 1 branch and writes the frame straight out without
+			// ever reading the value. The depth-of-field pass has its own
+			// highlight controls, in the add-on's panel.
+			if (c.renderCaptureMode == 2)
+			{
+				if (row == ROW_HIGHLIGHT) return false;
+				if (row == ROW_SHUTTER)   return true;
+			}
+
 			if ((row == ROW_SHUTTER || row == ROW_HIGHLIGHT) && c.renderSamples <= 1)
+				return false;
+
+			// The lens rows only mean anything in Depth of Field mode.
+			if ((row == ROW_DOF_SIZE || row == ROW_DOF_QUALITY || row == ROW_DOF_AF ||
+			     row == ROW_DOF_FX   || row == ROW_DOF_FY) && c.renderCaptureMode != 2)
+				return false;
+
+			// The aperture does the sampling there, and Samples is pinned to 1.
+			if (row == ROW_SAMPLES && c.renderCaptureMode == 2)
+				return false;
+
+			// A focus point you cannot move is not a setting.
+			if ((row == ROW_DOF_FX || row == ROW_DOF_FY) && !c.renderDofAutofocus)
 				return false;
 
 			return true;
@@ -900,7 +1116,13 @@ namespace exportmenu
 				if (insert < 0) return;
 			}
 
-			const int total = count + ROW_COUNT;
+			// Only the rows that apply this time round.
+			int vis[ROW_COUNT];
+			int nvis = 0;
+			for (int r = 0; r < ROW_COUNT; ++r)
+				if (rowVisible(r)) vis[nvis++] = r;
+
+			const int total = count + nvis;
 			const size_t bytes = (size_t)total * gsig::VEMENU_OPT_STRIDE;
 
 			// THE GAME'S ALLOCATOR, not the CRT. atArray::Reset() frees this
@@ -915,9 +1137,10 @@ namespace exportmenu
 
 			memcpy(buf, data, (size_t)insert * gsig::VEMENU_OPT_STRIDE);
 
-			for (int r = 0; r < ROW_COUNT; ++r)
+			for (int i = 0; i < nvis; ++i)
 			{
-				unsigned char* o = buf + (size_t)(insert + r) * gsig::VEMENU_OPT_STRIDE;
+				const int r = vis[i];
+				unsigned char* o = buf + (size_t)(insert + i) * gsig::VEMENU_OPT_STRIDE;
 
 				// Clone a stock settings row first, so Block and LinkMenuId are
 				// whatever the shipped XML says a row on this screen should
@@ -942,7 +1165,7 @@ namespace exportmenu
 				*(unsigned*)(o + gsig::VEMO_CONTEXT)         = 0;
 			}
 
-			memcpy(buf + (size_t)(insert + ROW_COUNT) * gsig::VEMENU_OPT_STRIDE,
+			memcpy(buf + (size_t)(insert + nvis) * gsig::VEMENU_OPT_STRIDE,
 			       data + (size_t)insert * gsig::VEMENU_OPT_STRIDE,
 			       (size_t)(count - insert) * gsig::VEMENU_OPT_STRIDE);
 
@@ -995,7 +1218,7 @@ namespace exportmenu
 			logger::write("info",
 				"exportmenu: %d rows added to EXPORT_SETTINGS at index %d "
 				"(menu %d, %d stock -> %d total%s)",
-				(int)ROW_COUNT, insert, idx, count, total,
+				nvis, insert, idx, count, total,
 				g_inj.headerHash ? "" : ", no description panel");
 
 			if (total > gsig::VEMENU_ITEMS_VISIBLE)

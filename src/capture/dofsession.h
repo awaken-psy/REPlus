@@ -108,4 +108,16 @@ namespace dofsession
 	// this has to be the last writer, or the editor's own camera update puts it
 	// back.
 	void applyToFrame(void* director);
+
+	// Answer the add-on's autofocus request for this frame.
+	//
+	// The add-on publishes whether it wants focus and where in the frame; we
+	// answer with what is actually there. Only this side can ask the world, and
+	// only the add-on knows its own bokeh size, so we report a measurement -
+	// distance along the view axis, and the lens half-angle that goes with it -
+	// and it converts that to the disparity its shader wants.
+	//
+	// Called BEFORE applyToFrame, so the FOV read is the shot's own and not one
+	// an aperture offset has already touched.
+	void autofocusTick(void* director);
 }

@@ -1516,6 +1516,8 @@ namespace smoothblend
 			// above it, and it is not part of the shot: the spline and the shake
 			// describe where the camera is, this describes where on the lens the
 			// sample was taken from.
+			// Before the aperture offset, so the fov it reads is the shot's own.
+			dofsession::autofocusTick(self);
 			dofsession::applyToFrame(self);
 
 			// After every writer, so the position it prints is the one that

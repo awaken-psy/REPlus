@@ -353,6 +353,128 @@ namespace gsig
 	// Also pinned: camReplayFreeCamera::m_Metadata at +0x250,
 	//              m_CapsuleRadius at metadata+0x178.
 	// -------------------------------------------------------------------------
+	// -------------------------------------------------------------------------
+	// WorldProbe shape test - what autofocus asks the world with
+	// -------------------------------------------------------------------------
+	//  Derived from the free camera's own collision sweep below, which is the
+	//  only place in either image known to run one. Three parts:
+	//
+	//    manager   a one-instruction getter returning a fixed global. No
+	//              singleton init and no ordering problem - the reason this
+	//              needs one signature rather than three.
+	//    submit    SubmitTest(manager, desc, 0) -> bool. Takes a lock.
+	//    desc      built on the stack, constructed by its own ctor, then the
+	//              caller overwrites the few fields it cares about.
+	//
+	//  THE DESCRIPTOR IS ~0x888 BYTES, which is not a typo and is why it must be
+	//  constructed rather than declared: roughly 0x800 of that is an embedded
+	//  region between +0x20 and +0x820 that the ctor leaves alone. Allocate it
+	//  zeroed, call the ctor, then set only what is below.
+	//
+	//    +0x000  vtable, written by the ctor
+	//    +0x008  test type. The ctor leaves 2; the collision sweep sets 3 and
+	//            fills in a radius, so 2 is a LINE PROBE and 3 a capsule.
+	//            Autofocus wants 2 - i.e. the ctor default, untouched.
+	//    +0x010  results object
+	//    +0x018  results array, which is resultsObject+0x08
+	//    +0x834  include mask. Ctor leaves 0xFFFFFFFF (everything).
+	//    +0x84C  options. Ctor leaves 4, the sweep uses 2.
+	//    +0x860  start xyz(w)
+	//    +0x870  end   xyz(w)
+	//    +0x880  radius - capsules only, left 0 for a probe
+	//
+	//  The mask is the one field that must NOT be copied from the sweep. It uses
+	//  0x84000004 (MOVER|GLASS|DEEP_SURFACE) - map geometry only, no peds and no
+	//  vehicles - so a probe borrowing it would focus straight through the
+	//  subject onto the wall behind. The ctor's 0xFFFFFFFF is the better start.
+	//
+	//  Results are a separate stack object: capacity u16 at +0x00, state int at
+	//  +0x04, array pointer at +0x08, then 32 entries of 0x40 bytes.
+	// -------------------------------------------------------------------------
+	//  NOTHING HERE NEEDS A PATTERN. Every address is DERIVED from the collision
+	//  sweep below, which is already signed on both builds.
+	//
+	//  The descriptor ctor is not called at all. Legacy has one; Enhanced has it
+	//  INLINED into the sweep, so there is no call to derive and no symmetry to
+	//  be had. Since the ctor only writes defaults - all of them read off the
+	//  Legacy one and listed as SHAPETEST_INIT_* below - the descriptor is built
+	//  by hand on both builds instead. That leaves the vtable as the one value
+	//  that cannot be invented, and it is derived per build:
+	//
+	//      leg  sweep +0x0CE  call ctor          -> ctor +0x06  lea rax, vtable
+	//      enh  sweep +0x161  lea rax, vtable    (the inlined store, one hop)
+	//
+	//  Two hops on Legacy, one on Enhanced. Both land on the same class - Legacy
+	//  rva 0x1A6B1B0, Enhanced rva 0x24835E0 - confirmed against the vtable the
+	//  ctors store.
+	//
+	//  THE FIELD LAYOUT IS IDENTICAL ON BOTH BUILDS, which is not the usual
+	//  outcome here and is worth stating plainly: Enhanced's sweep puts its
+	//  descriptor at rsp+0x9D0 and writes the mask at rsp+0x1204, the options at
+	//  +0x121C, start at +0x1230, end at +0x1240, radius at +0x1250 - every one
+	//  the same distance from the base as Legacy's. One set of offsets, no pair.
+	inline constexpr DerivePair SHAPETEST_MANAGER = {
+		{ 0x795, 0x796, OP_CALL, 1, 0 },   // enh
+		{ 0x1FE, 0x1FF, OP_CALL, 1, 0 }    // leg
+	};
+	inline constexpr DerivePair SHAPETEST_SUBMIT = {
+		{ 0x7A3, 0x7A4, OP_CALL, 1, 0 },   // enh
+		{ 0x20D, 0x20E, OP_CALL, 1, 0 }    // leg
+	};
+	// Enhanced reaches the vtable directly; Legacy reaches the CTOR here and
+	// takes a second hop from it.
+	inline constexpr Derive SHAPETEST_VTABLE_ENH  = { 0x161, 0x164, OP_LEA_RAX, 3, 0 };
+	inline constexpr Derive SHAPETEST_CTOR_LEG    = { 0x0CE, 0x0CF, OP_CALL,    1, 0 };
+	inline constexpr Derive SHAPETEST_VTABLE_FROM_CTOR_LEG = { 0x006, 0x009, OP_LEA_RAX, 3, 0 };
+
+	//  Results, a SEPARATE object the descriptor points at. Confirmed twice -
+	//  from the sweep's "how far can I move" helper, and from Enhanced's
+	//  SetResultsStructure, which also allocates the entry array when it is null
+	//  and stamps 0xFFFF into each entry at +0x38.
+	//      +0x00 (u8)  capacity, set before submitting
+	//      +0x01 (u8)  hit count, written by the test
+	//      +0x02 (u8)  set when the array was allocated FOR the object
+	//      +0x04 (u32) state; 3 means a test is in flight
+	//      +0x08 (ptr) entry array
+	//  Entries are 0x40 bytes. The only field autofocus needs is
+	//      +0x1C (float) T, the fraction along start..end
+	//  so the hit point is start + (end-start)*T and no position offset has to
+	//  be located at all.
+	inline constexpr int SHAPETEST_RES_CAPACITY = 0x00;
+	inline constexpr int SHAPETEST_RES_COUNT    = 0x01;
+	inline constexpr int SHAPETEST_RES_OWNS     = 0x02;
+	inline constexpr int SHAPETEST_RES_STATE    = 0x04;
+	inline constexpr int SHAPETEST_RES_ARRAY    = 0x08;
+	inline constexpr int SHAPETEST_RES_BYTES    = 0x10;
+	inline constexpr int SHAPETEST_ENTRY_BYTES  = 0x40;
+	inline constexpr int SHAPETEST_ENTRY_T      = 0x1C;
+	inline constexpr int SHAPETEST_ENTRY_MARK   = 0x38;   // stamped 0xFFFF when reset
+
+	//  What the ctor writes, so the descriptor can be built without calling it.
+	//  Read off the Legacy ctor; Enhanced's inlined copy writes the same values.
+	inline constexpr int   SHAPETEST_OFF_ZERO1  = 0x420;  // 0
+	inline constexpr int   SHAPETEST_OFF_ZERO2  = 0x828;  // 0
+	inline constexpr int   SHAPETEST_OFF_FLAGS1 = 0x838;  // 0x03E00000
+	inline constexpr int   SHAPETEST_OFF_FLAGS2 = 0x83C;  // 7   (byte)
+	inline constexpr int   SHAPETEST_OFF_CAP    = 0x840;  // results capacity
+	inline constexpr int   SHAPETEST_OFF_ZERO3  = 0x850;  // 0   (byte)
+	inline constexpr int   SHAPETEST_OFF_ZERO4  = 0x884;  // 0   (byte)
+	inline constexpr int   SHAPETEST_INIT_FLAGS1 = 0x03E00000;
+	inline constexpr int   SHAPETEST_INIT_FLAGS2 = 7;
+	inline constexpr unsigned SHAPETEST_MASK_ALL = 0xFFFFFFFFu;  // the ctor default
+	inline constexpr int   SHAPETEST_INIT_OPTIONS = 4;           // ctor default
+	inline constexpr int SHAPETEST_DESC_BYTES   = 0x890;  // rounded up from 0x888
+	inline constexpr int SHAPETEST_OFF_TYPE     = 0x008;
+	inline constexpr int SHAPETEST_OFF_RESULTS  = 0x010;
+	inline constexpr int SHAPETEST_OFF_RESARRAY = 0x018;
+	inline constexpr int SHAPETEST_OFF_MASK     = 0x834;
+	inline constexpr int SHAPETEST_OFF_OPTIONS  = 0x84C;
+	inline constexpr int SHAPETEST_OFF_START    = 0x860;
+	inline constexpr int SHAPETEST_OFF_END      = 0x870;
+	inline constexpr int SHAPETEST_OFF_RADIUS   = 0x880;
+	inline constexpr int SHAPETEST_TYPE_PROBE   = 2;
+	inline constexpr int SHAPETEST_TYPE_CAPSULE = 3;
+
 	inline constexpr Sig FREECAM_UPDATECOLLISION = {
 		// enh 0x23E7A0. Confirmed by five independent things, not just shape:
 		//   - signature (self, float* initialPos, float* cameraPos), as Legacy

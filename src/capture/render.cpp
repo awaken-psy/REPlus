@@ -27,6 +27,8 @@ namespace render
 			Ack,      // waiting for the addon to acknowledge our capture request
 			Audio,    // playing at normal speed, recording sound, no frames
 			Slide,    // the clip is PLAYING; accumulate whatever is presented
+			DofPass,  // waiting on the add-on to accumulate one frame across the
+			          // aperture. Tens of seconds, not milliseconds - see kDofGuardMs
 			ClipJump, // waiting for a clip step we asked the engine for
 			Rewind,   // audio done, going back to clip 1 to start the frames
 			Done,
@@ -42,6 +44,47 @@ namespace render
 		int   s_frame  = 0;      // output frame index
 		int   s_frames = 0;      // total output frames
 		int   s_sample = 0;      // sub-sample within the current output frame
+
+		// The depth-of-field pass in flight, if any.
+		uint32_t s_dofSeq     = 0;
+		uint32_t s_dofStartMs = 0;
+		int      s_dofRetries = 0;
+
+		// A refused pass is retried rather than fatal.
+		//
+		// Aborting on the first one threw away twenty-five minutes of finished
+		// frames because a single session start came back busy. The reasons a
+		// start can be refused are all transient - something else holding the
+		// clock for a frame, a seek still settling - so the right response is to
+		// ask again, and only give up if it keeps saying no.
+		constexpr int kDofMaxRetries = 5;
+
+		// A pass sweeps the whole aperture at the configured sample count, so it
+		// is a minutes-scale operation, not a frame-scale one. Timed in wall
+		// clock rather than counted in presents for the same reason the audio
+		// stall is: at 100 fps a present count that means "a while" during setup
+		// means "instantly" here.
+		constexpr uint32_t kDofGuardMs = 15u * 60u * 1000u;
+
+		// The live replay clock, for the depth-of-field trace below.
+		float clockNow()
+		{
+			return game::addr_g_ReplayTimeMs ? *(float*)game::addr_g_ReplayTimeMs : -1.0f;
+		}
+
+		// The shutter handed to a pass, in milliseconds of clip time.
+		//
+		// RenderShutter is a FRACTION of the output frame interval, which is the
+		// form the walking renderer wants; the add-on wants a duration. Converted
+		// here so there is exactly one shutter in the system and it is the one on
+		// the render settings - the panel's own value is not consulted in this
+		// mode, and two of them fighting would show up as blur that does not
+		// match the number anyone set.
+		float dofShutterMs()
+		{
+			if (s_cfg.fps <= 0.0f) return 0.0f;
+			return (1000.0f / s_cfg.fps) * s_cfg.shutter;
+		}
 		int   s_wait   = 0;      // settle frames remaining
 		int   s_guard  = 0;      // frames spent waiting for one ack
 
@@ -240,6 +283,20 @@ namespace render
 		// all ask the same question.
 		uint32_t    s_clockStillTick = 0;
 		int         s_autoOpen   = 0;   // ticks until the frame pass is started for us
+
+		// A frame is being captured - by a render OR by a depth-of-field session.
+		//
+		// The two are different features and it does not matter: both accumulate
+		// what is on screen into an output image, so both need the UI gone. The
+		// spinner hooks used to test only for a render, which meant a DoF session
+		// - which seeks constantly, and so raises the ring constantly - composited
+		// it into every sample. The movie hook below already got this right; the
+		// spinners did not, and this is the shared answer.
+		bool capturingFrame()
+		{
+			return (s_step != Step::Idle) || dofsession::active();
+		}
+
 		std::string s_pendingWav;
 
 		// Last value seen by the undiverted-bake watcher in pump(). File scope
@@ -276,7 +333,7 @@ namespace render
 		// the same reasoning as suppressing the spinner in its own draw call.
 		void __fastcall hkPointer()
 		{
-			if (s_step != Step::Idle && Config::get().renderHideHud)
+			if (capturingFrame() && Config::get().renderHideHud)
 				game::setCursorVisible(false);
 
 			// The frame pass is started from HERE, not from the render pump.
@@ -304,7 +361,7 @@ namespace render
 
 		void __fastcall hkSpinner(float a, int b, int cc)
 		{
-			if (s_step != Step::Idle)
+			if (capturingFrame())
 			{
 				// Suppress AND remember. Suppressing alone would leave a frame
 				// that the game itself considered unready; remembering alone
@@ -345,7 +402,7 @@ namespace render
 
 		void __fastcall hkBusySpinner()
 		{
-			if (s_step != Step::Idle)
+			if (capturingFrame())
 			{
 				s_spinnerSeen = true;
 				++s_spinnerHits;
@@ -382,7 +439,7 @@ namespace render
 		void __fastcall hkSpinnerOn(const char* bodyText, int icon, int sourceIndex)
 		{
 			if (sourceIndex == gsig::SPINNER_SOURCE_VIDEO_EDITOR &&
-			    s_step != Step::Idle)
+			    capturingFrame())
 			{
 				// Suppressing alone would leave a frame the game itself considered
 				// unready, so mark it too.
@@ -413,7 +470,7 @@ namespace render
 
 		void __fastcall hkDrawSpinner(void* pos, void* size, int a, int b, int c)
 		{
-			if (s_step != Step::Idle)
+			if (capturingFrame())
 			{
 				// Mid-capture: suppress and mark the frame unclean, exactly as the
 				// other spinner hooks do.
@@ -461,8 +518,7 @@ namespace render
 			// runs during ReShade's effect pass, i.e. after the game has drawn
 			// its own frame - so without this the timeline and transport bar are
 			// accumulated into every sample.
-			const bool capturing = (s_step != Step::Idle) || dofsession::active();
-			if (capturing && Config::get().renderHideHud) return;
+			if (capturingFrame() && Config::get().renderHideHud) return;
 
 			origDrawMovie(movieId, pos, scale, depth, colour, a, b, c, d);
 		}
@@ -553,15 +609,8 @@ namespace render
 		//
 		// With no speed markers anywhere, ConvertTimeToNonDilatedTimeMs is the
 		// identity and this returns exactly what sampleTimeDilated() did before.
-		float sampleTime()
-		{
-			const float t = sampleTimeDilated();
-			if (!Config::get().renderMarkerSpeed) return t;
-			return game::dilatedToNonDilatedMs(t);
-		}
-
 		// -------------------------------------------------------------------------
-		// sampleTime() in the units the game actually seeks in.
+		// The clock to seek to for the current frame and sub-sample.
 		//
 		// CReplayMgr::JumpTo takes an ABSOLUTE time inside the clip on screen,
 		// not a position in the project, and a clip trimmed out of the middle of
@@ -574,7 +623,19 @@ namespace render
 		// -------------------------------------------------------------------------
 		float seekTime()
 		{
-			return s_clipBase + (sampleTime() - s_clipProjAt);
+			// The clip remap happens in DILATED (real) time, because that is what
+			// it is for: output frames step uniformly in real time, and this
+			// keeps them doing so across a clip boundary.
+			const float clock = s_clipBase + (sampleTimeDilated() - s_clipProjAt);
+
+			if (!Config::get().renderMarkerSpeed) return clock;
+
+			// The marker's speed is applied LAST, and per clip, on an offset
+			// measured from that clip's own start. Applying it before the remap -
+			// which is what this did - fed the conversion a raw replay clock and
+			// asked for a position thousands of milliseconds into a one-second
+			// clip. See clipRealOffsetToClockMs.
+			return game::clipRealOffsetToClockMs(clock - s_clipBase);
 		}
 
 		// Point the mapping at whatever clip the editor is showing now, keeping
@@ -589,7 +650,7 @@ namespace render
 			else if (lo == s_firstLo && hi == s_firstHi) s_looped = true;
 
 			s_clipBase   = lo;
-			s_clipProjAt = sampleTime();
+			s_clipProjAt = sampleTimeDilated();
 			s_lastClock  = -1.0f;
 			logger::write("info", "render: clip %s - project %.0f now maps to clip time %.0f..%.0f",
 				why, s_clipProjAt, lo, hi);
@@ -715,6 +776,16 @@ namespace render
 
 		void finish(const char* why, bool complete)
 		{
+			// Unconditional, and first. A pass left running would keep sweeping an
+			// aperture for a render that no longer exists, and it holds the editor
+			// camera while it does. Covers the abort, the end of the sequence and
+			// Escape alike, because all three come through here.
+			if (s_dofSeq != 0)
+			{
+				fxcapture::dofEnd();
+				s_dofSeq = 0;
+			}
+
 			// Ten call sites pass complete=true and only two of them are "reached
 			// the target frame count" - the rest are early exits that the clock,
 			// the clip walk or the project wrap decided for us. Every one of them
@@ -892,7 +963,7 @@ namespace render
 
 			s_clipAt     = s_wantClip;
 			s_clipBase   = s_wantClipAt;
-			s_clipProjAt = sampleTime();
+			s_clipProjAt = sampleTimeDilated();
 			s_wantClip   = -1;
 			s_lastClock  = -1.0f;
 			s_shortRuns  = 0;
@@ -1053,6 +1124,30 @@ namespace render
 		s_cfg.highlight    = c.renderHighlight;
 		s_cfg.channelOrder = c.renderChannelOrder;
 		s_cfg.captureMode  = c.renderCaptureMode;
+		s_cfg.dofBokehSize = c.renderDofBokehSize;
+		s_cfg.dofQuality   = c.renderDofQuality;
+		s_cfg.dofAutofocus = c.renderDofAutofocus;
+		s_cfg.dofFocusX    = c.renderDofFocusX;
+		s_cfg.dofFocusY    = c.renderDofFocusY;
+
+		// Depth-of-field mode samples the APERTURE, so the renderer's own
+		// sub-sample loop would sample the same instant again - once per pass,
+		// at tens of seconds each.
+		//
+		// Forced HERE, where the snapshot is built, and not in the config load:
+		// there the clamps run before RenderCaptureMode has been read, so the
+		// test saw the default and never fired. The symptom was a render that
+		// looked healthy - sessions cycling once a minute, frames being written -
+		// while sitting on frame 0 for an hour, rewriting frame_000000 with 64
+		// consecutive aperture sweeps of the same instant.
+		if (s_cfg.captureMode == 2 && s_cfg.samples != 1)
+		{
+			logger::write("info",
+				"render: depth-of-field mode samples the aperture, so RenderSamples=%d "
+				"is ignored and treated as 1. Sample count comes from the add-on's bokeh "
+				"quality; RenderShutter still sets the exposure.", s_cfg.samples);
+			s_cfg.samples = 1;
+		}
 
 		// State the destination at startup, not only when a render begins.
 		//
@@ -1079,6 +1174,7 @@ namespace render
 	}
 
 	bool active()      { return s_step != Step::Idle; }
+	bool drivingDofPass() { return s_step != Step::Idle && s_cfg.captureMode == 2; }
 	int  frameCount()  { return s_frames; }
 	int  frameDone()   { return s_frame; }
 	const char* outputFolder() { return s_folder; }
@@ -1271,6 +1367,14 @@ namespace render
 			}
 
 			s_wait     = s_cfg.settleFrames;
+
+			// KNOWN, and not the settle. The first depth-of-field pass of a
+			// render measures its focus somewhere the later ones do not - 10.25 m
+			// against a steady 2.73 m for every frame after it. Settling frame 0
+			// for a full second first was tried on the theory that the world was
+			// still streaming back after the rewind to clip 1, and changed
+			// nothing, so that is not the cause. Left alone rather than papered
+			// over; frame 0 is one frame and the rest of the render is right.
 			s_step     = Step::Settle;
 			return true;
 		}
@@ -1382,14 +1486,51 @@ namespace render
 		// whether that was walking being slow or sliding being broken - and those
 		// have completely different causes. Reconstructing it from the ini is not
 		// the same thing: the ini is what it says NOW, not what that render ran.
-		const char* const mode = (s_cfg.captureMode == 1) ? "sliding" : "walking";
+		const char* const mode = (s_cfg.captureMode == 2) ? "depth of field"
+		                       : (s_cfg.captureMode == 1) ? "sliding" : "walking";
+
+		// Said once, up front, because the cost is not guessable from the
+		// settings: every output frame is a whole aperture sweep, so a figure
+		// people expect in minutes lands in hours. Better to see it in the log at
+		// frame 0 than to work it out from the ETA at frame 6.
+		if (s_cfg.captureMode == 2)
+		{
+			// The lens, stated at the start of the render.
+			//
+			// These live in three places - this menu, Render.ini, and the
+			// add-on's own panel - and the whole point of pushing them is that
+			// the first two win. Printing what was actually sent is the only way
+			// to tell a setting that did not reach the add-on from one that
+			// reached it and did nothing.
+			logger::write("info",
+				"render: lens - aperture %.3f, %d rings, autofocus %s at %.2f,%.2f, "
+				"highlight %.2f. These are pushed to the add-on; its own panel values "
+				"for these are not used.",
+				s_cfg.dofBokehSize, s_cfg.dofQuality,
+				s_cfg.dofAutofocus ? "on" : "off",
+				s_cfg.dofFocusX, s_cfg.dofFocusY, s_cfg.highlight);
+
+			logger::write("info",
+				"render: DEPTH OF FIELD - each frame is accumulated across a real "
+				"aperture by the add-on, not blurred afterwards. Shutter %.0f ms of "
+				"clip time per frame. This is the slow one: a pass is tens of seconds, "
+				"so expect hours rather than minutes, and leave it alone while it runs.",
+				dofShutterMs());
+		}
 
 		// No shutter angle when there is no blur. Printing "1 sample(s) @ 360 deg"
 		// states a setting that reaches nothing, and a log that reports inactive
 		// settings as if they applied is how an afternoon gets spent wondering why
 		// changing one made no difference.
-		char blur[64];
-		if (s_cfg.samples > 1)
+		char blur[96];
+		if (s_cfg.captureMode == 2)
+			// NOT "no motion blur", which is what this said and it was wrong: the
+			// aperture samples are spread across the shutter, so a pass carries
+			// blur as well as bokeh. Samples being 1 describes the renderer's own
+			// loop, not the exposure.
+			snprintf(blur, sizeof(blur), "blur from the aperture @ %.0f deg",
+				s_cfg.shutter * 360.0f);
+		else if (s_cfg.samples > 1)
 			snprintf(blur, sizeof(blur), "%d sample(s) @ %.0f deg",
 				s_cfg.samples, s_cfg.shutter * 360.0f);
 		else
@@ -2741,9 +2882,77 @@ namespace render
 				s_shortRuns = 0;
 			}
 
+			// Depth-of-field mode: the add-on accumulates this frame across the
+			// aperture, and we capture what it leaves on screen.
+			//
+			// Asked for HERE rather than earlier because the seek and the settle
+			// above have to have landed first - the pass anchors its shutter on
+			// the clock as it finds it, so starting one mid-seek would sweep the
+			// aperture around the wrong instant.
+			if (s_cfg.captureMode == 2)
+			{
+				if (Config::get().splineDebugLog)
+					logger::write("info",
+						"dof-seq: frame %d requesting pass, clock %.1f (settle done)",
+						s_frame, clockNow());
+				s_dofSeq     = fxcapture::dofRequest(dofShutterMs(), s_cfg.dofBokehSize, s_cfg.dofQuality,
+						s_cfg.dofAutofocus, s_cfg.dofFocusX, s_cfg.dofFocusY);
+				s_dofStartMs = GetTickCount();
+				if (s_dofSeq == 0)
+				{
+					finish("aborted - capture channel lost", false);
+					return;
+				}
+				s_step = Step::DofPass;
+				return;
+			}
+
 			char path[MAX_PATH];
 			buildPath(path, sizeof(path));
 			if (!fxcapture::requestSample(path, s_cfg.samples, s_sample))
+			{
+				finish("aborted - capture channel lost", false);
+				return;
+			}
+			s_guard = 0;
+			s_step  = Step::Ack;
+			return;
+		}
+
+		case Step::DofPass:
+		{
+			if (fxcapture::dofStatus() == 3)
+			{
+				if (++s_dofRetries > kDofMaxRetries)
+				{
+					finish("aborted - the depth-of-field pass kept being refused", false);
+					return;
+				}
+				logger::write("info",
+					"render: the depth-of-field pass was refused at frame %d - retrying "
+					"(%d of %d). The add-on's log names the reason.",
+					s_frame, s_dofRetries, kDofMaxRetries);
+				s_dofSeq     = fxcapture::dofRequest(dofShutterMs(), s_cfg.dofBokehSize, s_cfg.dofQuality,
+						s_cfg.dofAutofocus, s_cfg.dofFocusX, s_cfg.dofFocusY);
+				s_dofStartMs = GetTickCount();
+				return;
+			}
+
+			if (!fxcapture::dofDone(s_dofSeq))
+			{
+				if (GetTickCount() - s_dofStartMs > kDofGuardMs)
+					finish("aborted - the depth-of-field pass never finished", false);
+				return;
+			}
+
+			s_dofRetries = 0;
+
+			// The accumulated image is on screen and the add-on is holding the
+			// session open for exactly this. One plain capture - the sampling
+			// already happened, on the aperture.
+			char path[MAX_PATH];
+			buildPath(path, sizeof(path));
+			if (!fxcapture::requestSample(path, 1, 0))
 			{
 				finish("aborted - capture channel lost", false);
 				return;
@@ -2848,6 +3057,28 @@ namespace render
 			}
 
 			game::jumpProjectTo(seekTime(), 0);
+
+			// Trace the clock through the whole depth-of-field cycle.
+			//
+			// Three readings a frame, always on in this mode. The playhead was
+			// pinned to one instant for a whole render while the frame counter,
+			// the files and the progress line all looked correct, and reasoning
+			// about WHERE it was being reset produced three wrong answers in a
+			// row. These say it outright: what was asked for, what the clock read
+			// immediately after, and what it read when the next pass opened.
+			if (s_sample == 0)
+			{
+				// Both halves of the time, because seekTime() is built from
+				// sampleTime(), and sampleTime() runs sampleTimeDilated() through
+				// the marker-speed conversion. If the raw one advances and the
+				// converted one does not, the conversion is the fault - and it is
+				// the only step between them.
+				if (Config::get().splineDebugLog)
+					logger::write("info",
+						"seq: frame %d seek -> raw %.1f, asked %.1f, clock %.1f (markerSpeed=%d)",
+						s_frame, sampleTimeDilated(), seekTime(), clockNow(),
+						Config::get().renderMarkerSpeed ? 1 : 0);
+			}
 
 			// Advancing to a new output frame is a real seek - a whole frame
 			// interval. Stepping between sub-samples moves the clock by

@@ -77,11 +77,36 @@ static Setting kSettings[] =
   "Frames  - numbered PNG/JPEG sequence with an assemble.txt of ready-made ffmpeg commands. Audio lands as audio.wav beside them, and assemble.txt carries the line that attaches it.\r\n"
   "The capture itself is identical either way.", false, true },
 
-{ "RenderCaptureMode", "Capture mode", S_CHOICE, "Walking|Sliding",
+{ "RenderCaptureMode", "Capture mode", S_CHOICE, "Walking|Sliding|Depth of Field",
   "Sliding - the clip PLAYS in slow motion: it advances to each frame's mark, then exposes Motion blur samples consecutive frames with the world still simulating between them. Particles step, and anything with temporal history (TAA, SSR, ray tracing) stays warm instead of being reset at every sample.\r\n"
   "The default, and about 2x faster than Walking at a 360-degree shutter. Sliding spends one present per sample; Walking spends two - one to redraw at the new time, one to capture it - so it costs 2N+2 presents per frame against sliding's N.\r\n"
   "That edge is shutter-dependent: sliding needs Samples/Shutter presents, so at 0.5 the two are level and below that Walking wins.\r\n"
-  "Walking - pause, seek to each sub-sample, grab, average. Exact shutter placement, deterministic frame times, and a more obvious failure mode: a repeated frame rather than a smeared one. Use it if a sliding render looks wrong, or for short shutters.", false, true },
+  "Walking - pause, seek to each sub-sample, grab, average. Exact shutter placement, deterministic frame times, and a more obvious failure mode: a repeated frame rather than a smeared one. Use it if a sliding render looks wrong, or for short shutters.\r\n"
+  "Depth of Field - Walking with a real lens. The ReShade add-on accumulates each output frame across an actual aperture, so defocus comes from geometry instead of from blurring a finished picture: foreground and background occlude each other correctly, and highlights bloom into the aperture's own shape. Focus is measured in the world and follows the subject through the shot.\r\n"
+  "By far the slowest - every frame is a whole aperture sweep, so a shot measured in minutes elsewhere is measured in HOURS. Motion blur samples is ignored (the aperture does the sampling); Shutter still sets the exposure. Set the bokeh size and shape in ReShade's IGCS Connector panel.", false, true },
+
+{ "RenderDofBokehSize", "Aperture (DoF mode)", S_FLOAT, nullptr,
+  "How wide the lens opens, in world units. The whole creative control: bigger means shallower focus and larger bokeh, and it costs nothing extra to render.\r\n"
+  "What it costs is samples. The defocus disc is filled by discrete points, so a wide aperture at low Bokeh quality shows each out-of-focus highlight as a ring of separate dots instead of a smooth circle. Open it up and raise quality together.\r\n"
+  "Only used when Capture mode is Depth of Field. The bokeh SHAPE - vertices, rounding, rotation, aberration, fringe - stays in ReShade's IGCS Connector panel, because it is chosen by looking at a live image.", false },
+
+{ "RenderDofQuality", "Bokeh quality (DoF mode)", S_INT, nullptr,
+  "Rings of samples across the aperture. The total sample count grows with it, and so does render time - close to proportionally.\r\n"
+  "Set it by the blur you are asking for rather than by taste. A defocused highlight becomes exactly as many dots as there are samples, so a shot with small speculars out of focus needs far more than one without; smooth surfaces converge quickly, bright points are what force the number up.\r\n"
+  "12 is a reasonable starting point. 29 is roughly 1200 samples and about a minute per frame.", false },
+
+{ "RenderDofAutofocus", "Autofocus (DoF mode)", S_BOOL, nullptr,
+  "Measure focus in the world every frame, at the focus point below, so it follows the subject through the shot.\r\n"
+  "The measurement is a ray fired into the scene - not a guess from the depth buffer - so it lands on the surface you are actually pointing at. And it is a DEPTH rather than a spot: everything the same distance from the camera comes out sharp too.\r\n"
+  "Off leaves focus wherever the add-on's panel last set it.", false },
+
+{ "RenderDofFocusX", "Focus point X", S_FLOAT, nullptr,
+  "Where in the frame to measure focus, across. 0.5 is the centre, 0 the left edge.\r\n"
+  "Put it on the part that must be sharp - a face rather than the middle of a body, or the focal plane lands somewhere behind the eyes.", false },
+
+{ "RenderDofFocusY", "Focus point Y", S_FLOAT, nullptr,
+  "Where in the frame to measure focus, down. 0.5 is the centre, 0 the top edge.\r\n"
+  "A crosshair shows where it is while a depth-of-field session is open in ReShade.", false },
 
 { "RenderFps", "Frame rate", S_INT, nullptr,
   "Output frame rate, independent of the rate the game is running at. Halving it halves the render time.", false },

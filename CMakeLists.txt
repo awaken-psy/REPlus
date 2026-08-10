@@ -191,6 +191,8 @@ EnableRenderer=0           ; master switch. Off = the game's own Export runs
 
 ; Sliding = the clip plays; particles and TAA/SSR/RT stay live. Faster at 360.
 ; Walking = pause and seek per sample; exact shutter. Better below 0.5 shutter.
+; DepthOfField = Walking, but each frame is accumulated across a real aperture
+;   by the ReShade add-on. Optical defocus rather than a post-process. HOURS.
 RenderCaptureMode=Sliding
 RenderFps=30               ; output rate, independent of your actual framerate
 RenderSamples=64           ; renders averaged per frame. 1 = no motion blur
@@ -198,6 +200,14 @@ RenderShutter=1            ; 1.0 = 360 degrees, 0.5 = the 180 film convention
 RenderSettleFrames=3       ; Walking: redraw wait after a new-frame seek
 RenderSettleSubFrames=1    ; Walking: wait between sub-samples. Never 0
 RenderHighlightBoost=0.9   ; keeps speculars bright through accumulation
+
+; --- Depth of Field mode only -----------------------------------------------
+; Bokeh SHAPE stays in ReShade's IGCS Connector panel - it is judged by eye.
+RenderDofBokehSize=0.15    ; aperture width. Bigger = shallower focus
+RenderDofQuality=12        ; rings of samples. Higher = smoother bokeh, slower
+RenderDofAutofocus=1       ; measure focus in the world each frame
+RenderDofFocusX=0.5        ; where to measure, across the frame
+RenderDofFocusY=0.5        ; and down it
 RenderJpeg=0               ; 0 = PNG
 RenderQuality=90           ; JPEG only
 ; Colours wrong but the screen fine? Auto misreads Legacy/FiveM. Try 1, then 2.

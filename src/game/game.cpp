@@ -18,6 +18,9 @@ namespace game
 	uintptr_t addr_g_ReplayTimeMs     = 0;
 	uintptr_t addr_GetMaxDistanceFromPlayer = 0;
 	uintptr_t addr_UpdateCollision     = 0;
+	uintptr_t addr_ShapeTestManager    = 0;
+	uintptr_t addr_ShapeTestSubmit     = 0;
+	uintptr_t addr_ShapeTestVTable     = 0;
 	uintptr_t addr_ComputeSafePosition = 0;
 	uintptr_t addr_ProfanityGetStatus  = 0;
 	uintptr_t addr_JumpToNonDilated    = 0;
@@ -158,26 +161,39 @@ namespace game
 	// Returns the input unchanged when there is no controller: with no dilation
 	// information the honest answer is the identity, which is exactly the old
 	// behaviour rather than a wrong seek.
-	float dilatedToNonDilatedMs(float dilatedProjectMs)
+	// Real elapsed time INTO THE CURRENT CLIP -> the clock to seek to.
+	//
+	// Takes an offset into the clip, in real milliseconds, and returns the
+	// absolute replay clock of the moment that far into the shot once the
+	// marker's speed has been applied. A 50% marker means 100 ms of real
+	// exposure covers 50 ms of the recording, and this is what turns one into
+	// the other.
+	//
+	// THE ARGUMENT IS CLIP-RELATIVE, and that is the whole point of this
+	// function existing in this shape. It used to take a PROJECT time and
+	// subtract the length of the preceding clips itself - which is correct only
+	// if the caller has project time to give it. The renderer does not: its
+	// frame times come from the live replay clock, which is based at the clip's
+	// own start. On a project whose first clip begins at 8.1 s it therefore
+	// asked for "8126 ms into a 1006 ms clip", the controller clamped to the
+	// clip's end, and every frame of the render seeked to the same instant -
+	// while the frame counter, the files and the progress line all advanced
+	// normally. Sliding never saw it because it differences two of these and
+	// the per-clip base cancels; walking uses the absolute value.
+	float clipRealOffsetToClockMs(float realOffsetIntoClipMs)
 	{
 		void* ctrl = controller();
-		if (!ctrl) return dilatedProjectMs;
+		if (!ctrl) return realOffsetIntoClipMs;
 
 		const int ci = clipIndex();
-		if (ci < 0) return dilatedProjectMs;
+		if (ci < 0) return realOffsetIntoClipMs;
 
-		using LenFn  = float(__fastcall*)(void*, int);
+		// Negative is only reachable transiently while a clip step is in flight,
+		// and the conversion is not defined for it.
+		if (!(realOffsetIntoClipMs > 0.0f)) realOffsetIntoClipMs = 0.0f;
+
 		using ConvFn = float(__fastcall*)(void*, int, float);
-
-		const float toClip = slot<gsig::PBC_VT_LENTOCLIPMS, LenFn>(ctrl)(ctrl, ci);
-
-		// Clamp rather than pass a negative: a negative time into the clip is
-		// only reachable transiently while a clip step is in flight, and the
-		// conversion is not defined for it.
-		float intoClip = dilatedProjectMs - toClip;
-		if (!(intoClip > 0.0f)) intoClip = 0.0f;
-
-		return slot<gsig::PBC_VT_TOTONDILATED, ConvFn>(ctrl)(ctrl, ci, intoClip);
+		return slot<gsig::PBC_VT_TOTONDILATED, ConvFn>(ctrl)(ctrl, ci, realOffsetIntoClipMs);
 	}
 
 	// The inverse: authored time -> real elapsed time.
@@ -796,6 +812,41 @@ namespace game
 			addr_UpdateCollision = memory::scan(p).address;
 			logger::write("info", "  UpdateCollision      = %p (rva 0x%llX)", (void*)addr_UpdateCollision,
 				(uint64_t)(addr_UpdateCollision ? addr_UpdateCollision - memory::base() : 0));
+
+			// The world query autofocus asks. All of it hangs off the sweep we
+			// just found - see the block above SHAPETEST_MANAGER for why none of
+			// it is patterned, and why the ctor is rebuilt by hand rather than
+			// called (Enhanced has it inlined, so there is no call to reach).
+			if (addr_UpdateCollision)
+			{
+				const uintptr_t uc = addr_UpdateCollision;
+				addr_ShapeTestManager = derive(uc, pickD(gsig::SHAPETEST_MANAGER), "ShapeTestManager");
+				addr_ShapeTestSubmit  = derive(uc, pickD(gsig::SHAPETEST_SUBMIT),  "ShapeTestSubmit");
+
+				if (isEnhanced())
+				{
+					addr_ShapeTestVTable = derive(uc, gsig::SHAPETEST_VTABLE_ENH, "ShapeTestVTable");
+				}
+				else
+				{
+					// Two hops: the sweep calls a ctor, and the ctor stores the
+					// vtable. Nothing else on Legacy exposes it.
+					const uintptr_t ctor = derive(uc, gsig::SHAPETEST_CTOR_LEG, "ShapeTestDescCtor");
+					addr_ShapeTestVTable = ctor
+						? derive(ctor, gsig::SHAPETEST_VTABLE_FROM_CTOR_LEG, "ShapeTestVTable")
+						: 0;
+				}
+
+				logger::write("info", "  ShapeTestManager     = %p (rva 0x%llX)",
+					(void*)addr_ShapeTestManager,
+					(uint64_t)(addr_ShapeTestManager ? addr_ShapeTestManager - memory::base() : 0));
+				logger::write("info", "  ShapeTestSubmit      = %p (rva 0x%llX)",
+					(void*)addr_ShapeTestSubmit,
+					(uint64_t)(addr_ShapeTestSubmit ? addr_ShapeTestSubmit - memory::base() : 0));
+				logger::write("info", "  ShapeTestVTable      = %p (rva 0x%llX)",
+					(void*)addr_ShapeTestVTable,
+					(uint64_t)(addr_ShapeTestVTable ? addr_ShapeTestVTable - memory::base() : 0));
+			}
 		}
 		if (const char* p = pick(gsig::FREECAM_COMPUTESAFEPOSITION); p && *p)
 		{

@@ -537,6 +537,7 @@ struct Config
 			"; Empty = RockstarEditorPlus\\Captures\\\n"
 			"RenderOutputFolder=%s\n\n",
 			enableRenderer ? 1 : 0,
+			renderCaptureMode == 2 ? "DepthOfField" :
 			renderCaptureMode == 1 ? "Sliding" : "Walking",
 			renderFps, "              ", renderSamples, "          ",
 			renderShutter, "          ", renderSettleFrames, "     ",
@@ -754,6 +755,18 @@ struct Config
 	// either: one to redraw at the seeked time, one to capture it, and they
 	// cannot overlap without capturing a frame the world has already left.
 	int   renderCaptureMode  = 1;
+
+	// --- the lens, for DepthOfField capture mode ------------------------------
+	// Only the per-shot decisions live here. The bokeh SHAPE - vertices,
+	// rounding, rotation, aberration, fringe - stays in the add-on's panel,
+	// because it is chosen by looking at a live image; a number typed into a
+	// text menu cannot be judged. Pushed to the add-on when a pass starts and
+	// not polled, so the panel is authoritative at every other moment.
+	float renderDofBokehSize = 0.15f;  // aperture diameter. THE creative control
+	int   renderDofQuality   = 12;     // rings; the sample total follows from it
+	bool  renderDofAutofocus = true;   // measure focus in the world each frame
+	float renderDofFocusX    = 0.5f;   // where to measure, across the frame
+	float renderDofFocusY    = 0.5f;   // and down it
 
 	float renderFps          = 30.0f;
 	int   renderSamples      = 64;
@@ -1119,8 +1132,16 @@ struct Config
 		// <=1 already means "no blur" everywhere downstream, so the floor is only
 		// about keeping the divisor sane; the ceiling is what stops a stray extra
 		// digit turning one output frame into an hour of capture.
+		if (renderDofBokehSize < 0.001f) renderDofBokehSize = 0.001f;
+		if (renderDofBokehSize > 10.0f)  renderDofBokehSize = 10.0f;
+		if (renderDofQuality   < 1)      renderDofQuality   = 1;
+		if (renderDofQuality   > 100)    renderDofQuality   = 100;
+		if (!(renderDofFocusX >= 0.0f && renderDofFocusX <= 1.0f)) renderDofFocusX = 0.5f;
+		if (!(renderDofFocusY >= 0.0f && renderDofFocusY <= 1.0f)) renderDofFocusY = 0.5f;
+
 		if (renderSamples < 1)    renderSamples = 1;
 		if (renderSamples > 4096) renderSamples = 4096;
+
 
 		// The value is a FRACTION of the frame interval - 1.0 already IS 360
 		// degrees - but it is presented as "Shutter angle", which invites
@@ -1205,6 +1226,12 @@ struct Config
 			}
 		}
 
+		renderDofBokehSize = rFloat("RenderDofBokehSize", renderDofBokehSize);
+		renderDofQuality   = rInt  ("RenderDofQuality",   renderDofQuality);
+		renderDofAutofocus = rBool ("RenderDofAutofocus", renderDofAutofocus);
+		renderDofFocusX    = rFloat("RenderDofFocusX",    renderDofFocusX);
+		renderDofFocusY    = rFloat("RenderDofFocusY",    renderDofFocusY);
+
 		{
 			char m[32]{};
 			rStr("RenderCaptureMode", "", m, sizeof(m));
@@ -1212,9 +1239,16 @@ struct Config
 			// obvious spellings rather than silently falling back to the default,
 			// which is indistinguishable from the setting having worked.
 			if (m[0])
-				renderCaptureMode = (_stricmp(m, "Sliding") == 0 ||
-				                     _stricmp(m, "Slide")   == 0 ||
-				                     _stricmp(m, "Play")    == 0) ? 1 : 0;
+			{
+				renderCaptureMode =
+					(_stricmp(m, "Sliding")       == 0 ||
+					 _stricmp(m, "Slide")         == 0 ||
+					 _stricmp(m, "Play")          == 0) ? 1 :
+					(_stricmp(m, "DepthOfField")   == 0 ||
+					 _stricmp(m, "Depth of Field") == 0 ||
+					 _stricmp(m, "DoF")            == 0 ||
+					 _stricmp(m, "Aperture")       == 0) ? 2 : 0;
+			}
 		}
 
 		renderKeepFrames      = rBool("RenderKeepFrames", renderKeepFrames);
