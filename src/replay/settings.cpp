@@ -179,7 +179,11 @@ namespace rsettings
 	// not recognise the old key and skip it. Add freely, rename never.
 	const char* paramName(Param p)
 	{
-		static const char* const kNames[P_COUNT] = {
+		// NO explicit size. Declaring it [P_COUNT] made the assert below vacuous -
+		// the array is P_COUNT long by definition, missing entries are just null,
+		// and a Param added without a name reaches strcmp as nullptr on load. Let
+		// the initialiser size it so the count is the real one.
+		static const char* const kNames[] = {
 			"alpha", "easeIn", "easeOut",
 			"swayPos", "swayRot", "swayFreq",
 			"jitPos", "jitRot", "jitFreq",
@@ -188,6 +192,7 @@ namespace rsettings
 			"simple", "intensity", "freqMul",
 			"speedAmp", "speedFreq", "stopStill", "variation",
 			"unusedSine",
+			"dofAf", "dofDelta",
 		};
 		static_assert(sizeof(kNames) / sizeof(*kNames) == P_COUNT,
 			"a Param was added without a name - it would serialise as \"?\" and "

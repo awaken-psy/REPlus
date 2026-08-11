@@ -99,7 +99,7 @@ SmoothSpeedProfile=1       ; one speed curve across markers
 ArcLengthRemap=1           ; per-segment fallback, used only when both are 0
 Alpha=1                    ; tension: 0 uniform / 0.5 centripetal / 1 chordal
                            ; no effect while NaturalPacing=1
-SplineWeight=0             ; camera mass: 0 hits markers, 1 gets carried past them
+SplineWeight=0             ; camera mass on playback: 0 hits markers, 1 carried past
 
 ; --- Shake ------------------------------------------------------------------
 ; Defaults each marker inherits; per-marker, set its Shake row to "Rockstar
@@ -207,8 +207,6 @@ RenderHighlightBoost=0.9   ; keeps speculars bright through accumulation
 RenderDofBokehSize=0.15    ; aperture width. Bigger = shallower focus
 RenderDofQuality=12        ; rings of samples. Higher = smoother bokeh, slower
 RenderDofAutofocus=1       ; measure focus in the world each frame
-RenderDofFocusX=0.5        ; where to measure, across the frame
-RenderDofFocusY=0.5        ; and down it
 RenderJpeg=0               ; 0 = PNG
 RenderQuality=100          ; JPEG only. Below 91 = chroma subsampled
 ; Colours wrong but the screen fine? Auto misreads Legacy/FiveM. Try 1, then 2.

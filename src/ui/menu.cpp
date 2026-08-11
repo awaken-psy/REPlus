@@ -166,7 +166,8 @@ namespace menu
 		// is a page of its own rather than rows bolted onto Limits because it
 		// is the one group here that changes what the shot LOOKS like rather
 		// than what the camera is allowed to do.
-		enum { PAGE_CLOSED = 0, PAGE_CURVE, PAGE_LIMITS, PAGE_SCENE, PAGE_COUNT };
+		enum { PAGE_CLOSED = 0, PAGE_CURVE, PAGE_LIMITS, PAGE_SCENE, PAGE_FOCUS,
+		       PAGE_COUNT };
 		int  g_page         = PAGE_CLOSED;
 		bool g_stockShakeSet = false; // marker has a GAME shake, so the camera
 		                              // menu will also draw intensity + speed
@@ -210,7 +211,7 @@ namespace menu
 			// to remove.
 			ROW_APPLY_ALL,
 			// Simple-mode enum rows. The numeric ones live below with the rest.
-			ROW_SHAKE_MODE, ROW_STOP_STILL,
+			ROW_SHAKE_MODE, ROW_STOP_STILL, ROW_DOF_AF,
 			ROW_NUM_FIRST,                 // everything below is numeric
 			ROW_INTENSITY = ROW_NUM_FIRST, ROW_FREQ_MUL, ROW_VARIATION,
 			ROW_SPEED_AMP, ROW_SPEED_FREQ,
@@ -220,6 +221,10 @@ namespace menu
 			ROW_ROUGH, ROW_SEED,
 			ROW_AX_LAT, ROW_AX_FWD, ROW_AX_VERT,
 			ROW_AX_PITCH, ROW_AX_ROLL, ROW_AX_YAW,
+			// Append only, and kNums below must gain its entry in the SAME
+			// position - the lookup is by index, so a row added to one and not
+			// the other silently edits a different parameter.
+			ROW_DOF_DELTA,
 			ROW_LOGICAL_MAX
 		};
 
@@ -247,7 +252,8 @@ namespace menu
 		// That is why "Shake" is two pages rather than one long one: what the
 		// shake IS, then how it reacts to movement.
 		enum Group { GRP_HIDDEN = 0, GRP_SPLINE, GRP_SHAKE, GRP_MOTION,
-		             GRP_SWAY, GRP_JITTER, GRP_DETAIL, GRP_AXES, GRP_MAX };
+		             GRP_SWAY, GRP_JITTER, GRP_DETAIL, GRP_AXES,
+		             GRP_MAX };
 
 		// Which populate we are currently inside. The two menus are separate
 		// screens - you are never in both - so one set of row state serves both,
@@ -333,6 +339,14 @@ namespace menu
 			int         decimals;
 			const char* suffix;
 			bool        integer;
+
+			// Scales the shared Adjust Step for THIS row.
+			//
+			// One global increment cannot serve every row: the shake amplitudes want
+			// tenths, and an IGCS focus delta lives around 0.04 and needs five
+			// decimals. At the shared minimum of 0.001 that row had three usable
+			// steps across its whole working range.
+			float       stepMul = 1.0f;
 		};
 
 		const Num* numFor(int row)
@@ -364,6 +378,7 @@ namespace menu
 				/* AX_PITCH  */ { P_AX_PITCH,  0.0f, 2.0f,    2, "",     false },
 				/* AX_ROLL   */ { P_AX_ROLL,   0.0f, 2.0f,    2, "",     false },
 				/* AX_YAW    */ { P_AX_YAW,    0.0f, 2.0f,    2, "",     false },
+				/* DOF_DELTA */ { P_DOF_DELTA, 0.0f, 0.5f,    5, "",     false, 0.01f },
 			};
 			if (!isNumeric(row)) return nullptr;
 			const int i = row - ROW_NUM_FIRST;
@@ -394,6 +409,8 @@ namespace menu
 			case rsettings::P_AX_PITCH:  return c.shake.axisRot[0];
 			case rsettings::P_AX_ROLL:   return c.shake.axisRot[1];
 			case rsettings::P_AX_YAW:    return c.shake.axisRot[2];
+			// The render's own value is the default a marker inherits.
+			case rsettings::P_DOF_DELTA: return c.renderDofFocusDelta;
 			case rsettings::P_INTENSITY: return c.shake.amplitude;
 			case rsettings::P_FREQ_MUL:  return c.shake.frequency;
 			case rsettings::P_VARIATION: return c.shake.variation;
@@ -415,6 +432,21 @@ namespace menu
 				s_rows[s_shown++] = ROW_G_HEADER;
 				if (g_page == PAGE_CLOSED) return;   // just the one row
 
+				// Per-marker rows on the TOP-LEVEL menu, which the rest of this page
+				// family is not. They sit here rather than in the Camera submenu for a
+				// plain functional reason: those rows only come alive when the marker
+				// has a camera transition, and focus applies to every marker.
+				//
+				// ROW_STEP comes with them, breaking this family's named-choices-only
+				// rule. A focus delta lives around 0.04 and needs five decimals, so
+				// there is nothing to name - it has to be stepped.
+				if (g_page == PAGE_FOCUS)
+				{
+					s_rows[s_shown++] = ROW_DOF_AF;
+					s_rows[s_shown++] = ROW_DOF_DELTA;
+					s_rows[s_shown++] = ROW_STEP;
+					return;
+				}
 				if (g_page == PAGE_CURVE)
 				{
 					s_rows[s_shown++] = ROW_G_PATH;
@@ -565,6 +597,8 @@ namespace menu
 			case ROW_SPEED_AMP:  return "Motion -> Intensity";
 			case ROW_SPEED_FREQ: return "Motion -> Speed";
 			case ROW_STOP_STILL: return "Stop When Still";
+			case ROW_DOF_AF:     return "Autofocus";
+			case ROW_DOF_DELTA:  return "Focus Distance";
 			default:            return "";
 		}
 		}
@@ -607,6 +641,13 @@ namespace menu
 					: Config::get().shake.simpleMode;
 				return simple ? "Simple" : "Complex";
 			}
+			if (row == ROW_DOF_AF)
+			{
+				const bool on = s.has(rsettings::P_DOF_AF)
+					? s.v[rsettings::P_DOF_AF] > 0.5f
+					: Config::get().renderDofAutofocus;
+				return on ? "On" : "Off";
+			}
 			if (row == ROW_STOP_STILL)
 			{
 				const bool on = s.has(rsettings::P_STOP_STILL)
@@ -644,6 +685,7 @@ namespace menu
 				return g_page == PAGE_CURVE  ? "Curve"
 				     : g_page == PAGE_LIMITS ? "Limits"
 				     : g_page == PAGE_SCENE  ? "Scene"
+				     : g_page == PAGE_FOCUS  ? "Depth of Field"
 				                             : "Closed";
 			if (row == ROW_G_PATH)
 				return (Config::get().splinePosition ? "On" : "Off");
@@ -731,7 +773,8 @@ namespace menu
 			case ROW_G_ROT:
 			case ROW_G_FOV:
 			case ROW_SHAKE_MODE:
-			case ROW_STOP_STILL: return 2;
+			case ROW_STOP_STILL:
+			case ROW_DOF_AF:     return 2;
 			case ROW_G_ALPHA:   return 3;
 			case ROW_G_WEIGHT:  return 5;
 			case ROW_G_HEADER:  return PAGE_COUNT;
@@ -817,6 +860,10 @@ namespace menu
 				return "Extra shake rate when the camera is moving fast.";
 			case ROW_STOP_STILL:
 				return "Fade the shake out while the camera is parked.";
+			case ROW_DOF_AF:
+				return "Measure focus in the WORLD each frame, at the centre of frame. Off uses Focus Distance instead. Depth-of-field renders only - it does not change the preview.";
+			case ROW_DOF_DELTA:
+				return "Manual focus, in the add-on's own disparity units - the number its Focus Delta slider shows. Ignored while Autofocus is On. Interpolated between markers, so two values across a shot give a focus pull.";
 
 			case ROW_SWAY_POS:   return "Slow layer: movement, in metres.";
 			case ROW_SWAY_ROT:   return "Slow layer: rotation, in degrees. This is what sells handheld.";
@@ -856,9 +903,11 @@ namespace menu
 			case ROW_G_ROT:   return "Replace the marker-to-marker camera ROTATION with a curve.";
 			case ROW_G_FOV:   return "Replace the marker-to-marker ZOOM blend with a curve.";
 			case ROW_G_WEIGHT:
-				return !c.splinePosition
-					? "No effect while Spline Path is Off - this shapes the curve, and there is no curve until that is On."
-					: "How much MASS the camera has. Off hits every marker exactly, which reads as weightless. Higher lets the camera be carried past them the way a heavy rig is - the markers become where you steered, not where it went. Affects position only; the aim still snaps.";
+				// The Off branch tests ALL THREE channels now, not just Path: weight
+				// moves the aim and the zoom too, and each has its own switch.
+				return (!c.splinePosition && !c.splineOrientation && !c.splineFov)
+					? "No effect while Spline Path, Rotation and Zoom are all Off - this shapes the curve, and there is no curve until one of them is On."
+					: "How much MASS the camera has. Off hits every marker exactly, which reads as weightless. Higher lets the camera be carried past them the way a heavy rig is - the markers become where you steered, not where it went. Moves position, aim and zoom. Applies while PLAYING only: parked, the camera stays exactly where you put it, so what you frame is what the marker records.";
 			case ROW_G_ALPHA:
 				return c.naturalPacing
 					? "No effect under Natural pacing: a time-driven path has no knot "
@@ -1019,6 +1068,11 @@ namespace menu
 			if (row == ROW_STOP_STILL)
 			{
 				s.v[rsettings::P_STOP_STILL] = (delta > 0) ? 1.0f : 0.0f;
+				return;
+			}
+			if (row == ROW_DOF_AF)
+			{
+				s.v[rsettings::P_DOF_AF] = (delta > 0) ? 1.0f : 0.0f;
 				return;
 			}
 			if (row == ROW_PATH)
@@ -1227,7 +1281,7 @@ namespace menu
 			// jump to zero the moment you touch it.
 			float cur = s.has(n->param) ? s.v[n->param] : globalValue(n->param);
 
-			float step = kStepVals[s_step];
+			float step = kStepVals[s_step] * n->stepMul;
 			if (n->integer && step < 1.0f) step = 1.0f;
 
 			cur += step * (float)delta;

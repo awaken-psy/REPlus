@@ -30,6 +30,19 @@ namespace smoothblend
 	// lifetime. It saves resolving the director global separately.
 	static void* volatile s_lastDirector = nullptr;
 
+	// Resolved once per frame by applySpline and read by the renderer.
+	struct FocusNow { bool  valid = false; float delta = 0.0f; bool af = true; };
+	static FocusNow s_focus;
+
+
+	bool focusNow(float* delta, bool* autofocus)
+	{
+		if (!s_focus.valid) return false;
+		if (delta)     *delta     = s_focus.delta;
+		if (autofocus) *autofocus = s_focus.af;
+		return true;
+	}
+
 	void* lastDirector() { return (void*)s_lastDirector; }
 
 	// A marker is only usable as a control point if it lives in the same
@@ -295,6 +308,82 @@ namespace smoothblend
 		bool   have[6]{};
 	};
 
+	// Is the clip PLAYING, or is the user authoring at a parked playhead?
+	//
+	// Camera Weight on ROTATION is a playback effect and must not apply while the
+	// camera is being driven by hand. The game computes free-cam MOVEMENT from
+	// its own heading, while the view comes from the matrix we overwrite. Offset
+	// the aim at a parked marker and the two differ by a fixed yaw for as long as
+	// you stand there: W drives forward-and-right of where you are looking.
+	// mirrorAuthoringFrame cannot help - it writes the AUTHOR matrix, which is
+	// what gets saved, not the heading the movement basis reads.
+	//
+	// It applies to EVERY channel, not just rotation. mirrorAuthoringFrame
+	// copies the post-spline frame into the AUTHOR slots, which is what a new
+	// marker records - so a weighted pose gets saved as the keyframe, and the
+	// weight then applies again on top of it. Creating a marker moved the
+	// camera in the second-difference direction, which looks random.
+	//
+	// So: while authoring the camera is exactly where you put it, and the
+	// weight is what playback does with those markers.
+	static bool weightActiveNow()
+	{
+		// A depth-of-field pass deliberately parks the playhead for tens of
+		// seconds, so a render always counts as playing.
+		if (render::active()) return true;
+		if (!game::addr_g_ReplayTimeMs) return false;
+
+		const float now = *(float*)game::addr_g_ReplayTimeMs;
+		static float prev  = -1.0f;
+		static int   still = 0;
+		if (prev >= 0.0f && now != prev) still = 0; else if (still < 64) ++still;
+		prev = now;
+		// A couple of frames of slack: a paused clock is exactly still, a playing
+		// one can repeat a value across a duplicated present.
+		return still < 3;
+	}
+
+	// Camera weight on a quaternion channel.
+	//
+	// Approximate on purpose: a true quaternion B-spline is the cumulative
+	// exp/log form, not a weighted sum. A normalised weighted average is
+	// indistinguishable at camera scale, where adjacent markers sit well under
+	// 90 degrees apart - and qk must ALREADY be hemisphere-aligned or the sum
+	// partially cancels.
+	//
+	// Shared by BOTH rotation paths on purpose. The free world-quaternion path
+	// and the attached one are separate evaluations of the same idea, and
+	// weighting only one of them is how this first shipped feeling completely
+	// inert to anyone not using attached or look-at markers.
+	static rquat::Quat weighQuat(const rquat::Quat qk[4], const float k6[6],
+	                             float at, rquat::Quat q, float wgt)
+	{
+		if (!(wgt > 0.0f)) return q;
+		if (wgt > 1.0f) wgt = 1.0f;
+
+		float bw[4]; spline::bsplineW(k6, at, bw);
+		rquat::Quat bs;
+		bs.x = qk[0].x*bw[0] + qk[1].x*bw[1] + qk[2].x*bw[2] + qk[3].x*bw[3];
+		bs.y = qk[0].y*bw[0] + qk[1].y*bw[1] + qk[2].y*bw[2] + qk[3].y*bw[3];
+		bs.z = qk[0].z*bw[0] + qk[1].z*bw[1] + qk[2].z*bw[2] + qk[3].z*bw[3];
+		bs.w = qk[0].w*bw[0] + qk[1].w*bw[1] + qk[2].w*bw[2] + qk[3].w*bw[3];
+
+		float n = sqrtf(bs.x*bs.x + bs.y*bs.y + bs.z*bs.z + bs.w*bs.w);
+		if (!(n > 1e-5f)) return q;
+		const float inv = 1.0f / n;
+		bs.x*=inv; bs.y*=inv; bs.z*=inv; bs.w*=inv;
+
+		// Short way round before blending.
+		if (q.x*bs.x + q.y*bs.y + q.z*bs.z + q.w*bs.w < 0.0f)
+			{ bs.x=-bs.x; bs.y=-bs.y; bs.z=-bs.z; bs.w=-bs.w; }
+
+		q.x += (bs.x-q.x)*wgt; q.y += (bs.y-q.y)*wgt;
+		q.z += (bs.z-q.z)*wgt; q.w += (bs.w-q.w)*wgt;
+		n = sqrtf(q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w);
+		if (n > 1e-5f) { const float i2 = 1.0f/n; q.x*=i2; q.y*=i2; q.z*=i2; q.w*=i2; }
+		return q;
+	}
+
 	static Vec3 pointAt(const Window& w, int i)
 	{
 		if (w.have[i]) return w.p[i];
@@ -551,7 +640,7 @@ namespace smoothblend
 		// segmentLength and paramAtDistance measure by SAMPLING the curve, so if
 		// they were left on the unweighted path they would pace the camera along
 		// a curve it is not on - and the heavier the weight, the further out.
-		const float wgt = cfg.splineWeight;
+		const float wgt = weightActiveNow() ? cfg.splineWeight : 0.0f;
 
 		const int nextIdx = game::nextMarkerIndex(currIdx);
 		void* next = rstorage::tryGetMarker(storage, nextIdx);
@@ -698,7 +787,7 @@ namespace smoothblend
 		const Vec3 c0 = pointAt(w, 0), c1 = pointAt(w, 1), c2 = pointAt(w, 2);
 		const Vec3 c3 = pointAt(w, 3), c4 = pointAt(w, 4), c5 = pointAt(w, 5);
 
-		const float lenCurr = spline::segmentLength(c1, c2, c3, c4, alpha, wgt);
+		const float lenCurr = spline::segmentLength(c1, c2, c3, c4, alpha, wgt, &c0, &c5);
 
 		// A zero-length path has nothing to interpolate. In WORLD space that is
 		// two markers in the same place and stock handles it fine.
@@ -717,7 +806,7 @@ namespace smoothblend
 		// spline is doing anything you could see: if it is near zero the curve
 		// and the lerp are the same path, and no amount of splining will look
 		// different from linear.
-		const Vec3 mid  = spline::catmullRom(c1, c2, c3, c4, 0.5f, alpha, wgt);
+		const Vec3 mid  = spline::catmullRom(c1, c2, c3, c4, 0.5f, alpha, wgt, &c0, &c5);
 		const Vec3 lerp = (c2 + c3) * 0.5f;
 		const float bow = (mid - lerp).length();
 
@@ -770,6 +859,48 @@ namespace smoothblend
 			tCurr, tNext,
 			w.have[4] ? rmarker::timeMs(w.m[4]) : tNext + span,
 		};
+
+		// The two knots OUTSIDE that window, for the B-spline blend only.
+		// Real where a marker exists; reflected only at a genuine clip end,
+		// which is the one place two windows cannot disagree about it.
+		const float tkOut[2] = {
+			w.have[0] ? rmarker::timeMs(w.m[0]) : tk[0] - (tk[1] - tk[0]),
+			w.have[5] ? rmarker::timeMs(w.m[5]) : tk[3] + (tk[3] - tk[2]),
+		};
+
+		// --- IGCS focus, per marker ------------------------------------------
+		//
+		// Both values inherit the render's own configured ones when a marker has
+		// no override, which is what makes a project with nothing set behave
+		// exactly as it did before per-marker focus existed.
+		{
+			const Config& cfgF = Config::get();
+
+			// The store is keyed by TIME, and `ms` above is already this marker's.
+			const rsettings::MarkerSettings msNext = rsettings::get(tNext);
+
+			const float dCurr = ms.has(rsettings::P_DOF_DELTA)
+				? ms.v[rsettings::P_DOF_DELTA] : cfgF.renderDofFocusDelta;
+			// A next marker with nothing set holds focus rather than pulling back to
+			// the global - otherwise setting focus on ONE marker would rack away from
+			// it across the following shot, which is the opposite of what was asked.
+			const float dNext = msNext.has(rsettings::P_DOF_DELTA)
+				? msNext.v[rsettings::P_DOF_DELTA] : dCurr;
+
+			// Sampled on the two markers bounding the shot and lerped by where the
+			// clock sits between them. A focus pull is a linear move on the lens;
+			// pchip's extra knots would drag a third marker's focus into a
+			// two-marker pull.
+			const float dspan = tNext - tCurr;
+			float u = (dspan > 1e-3f) ? (now - tCurr) / dspan : 0.0f;
+			if (!(u > 0.0f)) u = 0.0f;
+			if (u > 1.0f)    u = 1.0f;
+
+			s_focus.delta = dCurr + (dNext - dCurr) * u;
+			s_focus.af    = ms.has(rsettings::P_DOF_AF)
+				? ms.v[rsettings::P_DOF_AF] > 0.5f : cfgF.renderDofAutofocus;
+			s_focus.valid = true;
+		}
 
 		// =====================================================================
 		//  The clock, remapped through this marker's ease
@@ -859,8 +990,8 @@ namespace smoothblend
 			// easedAt is the identity, so this is the previous expression exactly.
 			constexpr float kH = 8.0f;   // ms
 			const Vec3 ctrl[4] = { c1, c2, c3, c4 };
-			const Vec3 pA = spline::hermitePos(ctrl, tk, easedAt(now - kH), wgt);
-			const Vec3 pB = spline::hermitePos(ctrl, tk, easedAt(now + kH), wgt);
+			const Vec3 pA = spline::hermitePos(ctrl, tk, easedAt(now - kH), wgt, &tkOut[0], &tkOut[1]);
+			const Vec3 pB = spline::hermitePos(ctrl, tk, easedAt(now + kH), wgt, &tkOut[0], &tkOut[1]);
 			s_pathSpeed      = (pB - pA).length() / (2.0f * kH * 0.001f);
 			s_pathSpeedValid = true;
 		}
@@ -872,8 +1003,8 @@ namespace smoothblend
 		// the two agree now.
 		else if (cfg.smoothSpeedProfile && !hasEase)
 		{
-			const float lenPrev = w.have[1] ? spline::segmentLength(c0, c1, c2, c3, alpha, wgt) : lenCurr;
-			const float lenNext = w.have[4] ? spline::segmentLength(c2, c3, c4, c5, alpha, wgt) : lenCurr;
+			const float lenPrev = w.have[1] ? spline::segmentLength(c0, c1, c2, c3, alpha, wgt, nullptr, &c4) : lenCurr;
+			const float lenNext = w.have[4] ? spline::segmentLength(c2, c3, c4, c5, alpha, wgt, &c1, nullptr) : lenCurr;
 
 			// Knot times. Mirror the interval when a neighbour is missing so the
 			// end tangents stay sane instead of collapsing to zero.
@@ -887,7 +1018,7 @@ namespace smoothblend
 			if (!(dist > 0.0f)) dist = 0.0f;
 			if (dist > lenCurr)  dist = lenCurr;
 
-			u = spline::paramAtDistance(c1, c2, c3, c4, dist, alpha, wgt);
+			u = spline::paramAtDistance(c1, c2, c3, c4, dist, alpha, wgt, &c0, &c5);
 
 			// Camera speed at this instant, for shake coupling.
 			//
@@ -915,7 +1046,7 @@ namespace smoothblend
 			const float frac = spline::ease(t, easeIn, easeOut);
 
 			u = cfg.arcLengthRemap
-				? spline::paramAtDistance(c1, c2, c3, c4, frac * lenCurr, alpha, wgt)
+				? spline::paramAtDistance(c1, c2, c3, c4, frac * lenCurr, alpha, wgt, &c0, &c5)
 				: frac;
 
 			// Same idea on the eased path: differentiate the ease curve rather
@@ -953,8 +1084,8 @@ namespace smoothblend
 			// set this is what makes the dolly ease along with the framing instead
 			// of the two disagreeing. The non-natural branch already carries the
 			// ease inside u.
-			Vec3 pos = naturalPath ? spline::hermitePos(ctrl, tk, easedNow, wgt)
-			                       : spline::catmullRom(c1, c2, c3, c4, u, alpha, wgt);
+			Vec3 pos = naturalPath ? spline::hermitePos(ctrl, tk, easedNow, wgt, &tkOut[0], &tkOut[1])
+			                       : spline::catmullRom(c1, c2, c3, c4, u, alpha, wgt, &c0, &c5);
 
 			// DIAGNOSTIC: exaggerate how far the curve departs from the straight
 			// line, without moving either endpoint.
@@ -1074,11 +1205,12 @@ namespace smoothblend
 				// Camera weight on the zoom, same idea as position: a heavy lens does
 				// not hit the authored FOV, it is carried toward it. Scalar, so this is
 				// the exact B-spline rather than the approximation rotation needs.
-				if (Config::get().splineWeight > 0.0f)
+				if (wgt > 0.0f)
 				{
-					float bw[4]; spline::bsplineW(tk, now, bw);
+					const float k6[6] = { tkOut[0], tk[0], tk[1], tk[2], tk[3], tkOut[1] };
+					float bw[4]; spline::bsplineW(k6, now, bw);
 					const float bs = fk[0]*bw[0]+fk[1]*bw[1]+fk[2]*bw[2]+fk[3]*bw[3];
-					if (isfinite(bs)) fov += (bs - fov) * Config::get().splineWeight;
+					if (isfinite(bs)) fov += (bs - fov) * wgt;
 				}
 				if (isfinite(fov))
 				{
@@ -1215,39 +1347,11 @@ namespace smoothblend
 				? rquat::align(attachWorldQuat(w.m[4], parent), q2) : q2;
 
 			const rquat::Quat qk[4] = { q0, q1, q2, q3 };
-			rquat::Quat q = rquat::hermite(qk, tk, rotAt);
+			const float k6[6] = { tkOut[0], tk[0], tk[1], tk[2], tk[3], tkOut[1] };
+			const rquat::Quat q = weighQuat(qk, k6, rotAt,
+				rquat::hermite(qk, tk, rotAt),
+				wgt);
 
-			// Camera weight on the AIM. This is where most of the felt mass is - a
-			// heavy head has to be swung, it does not snap to a new look direction.
-			//
-			// Approximate on purpose: a true quaternion B-spline is the cumulative
-			// exp/log form, not a weighted sum. A normalised weighted average is
-			// indistinguishable at camera scale, where adjacent markers are well
-			// under 90 degrees apart, and q0..q3 are already hemisphere-aligned
-			// above - without that the sum would partially cancel.
-			if (Config::get().splineWeight > 0.0f)
-			{
-				float bw[4]; spline::bsplineW(tk, rotAt, bw);
-				rquat::Quat bs;
-				bs.x = qk[0].x*bw[0]+qk[1].x*bw[1]+qk[2].x*bw[2]+qk[3].x*bw[3];
-				bs.y = qk[0].y*bw[0]+qk[1].y*bw[1]+qk[2].y*bw[2]+qk[3].y*bw[3];
-				bs.z = qk[0].z*bw[0]+qk[1].z*bw[1]+qk[2].z*bw[2]+qk[3].z*bw[3];
-				bs.w = qk[0].w*bw[0]+qk[1].w*bw[1]+qk[2].w*bw[2]+qk[3].w*bw[3];
-				float n = sqrtf(bs.x*bs.x+bs.y*bs.y+bs.z*bs.z+bs.w*bs.w);
-				if (n > 1e-5f)
-				{
-					const float inv = 1.0f/n;
-					bs.x*=inv; bs.y*=inv; bs.z*=inv; bs.w*=inv;
-					// Take the short way round before blending.
-					if (q.x*bs.x+q.y*bs.y+q.z*bs.z+q.w*bs.w < 0.0f)
-						{ bs.x=-bs.x; bs.y=-bs.y; bs.z=-bs.z; bs.w=-bs.w; }
-					const float wq = Config::get().splineWeight;
-					q.x += (bs.x-q.x)*wq; q.y += (bs.y-q.y)*wq;
-					q.z += (bs.z-q.z)*wq; q.w += (bs.w-q.w)*wq;
-					n = sqrtf(q.x*q.x+q.y*q.y+q.z*q.z+q.w*q.w);
-					if (n > 1e-5f) { const float i2=1.0f/n; q.x*=i2; q.y*=i2; q.z*=i2; q.w*=i2; }
-				}
-			}
 			s_trace.orient = 'e';
 
 			if (isfinite(q.x) && isfinite(q.y) && isfinite(q.z) && isfinite(q.w))
@@ -1298,7 +1402,10 @@ namespace smoothblend
 			// same knots - so the rate arriving at a marker matches the rate
 			// leaving it however unevenly the markers are spaced.
 			const rquat::Quat qk[4] = { q0, q1, q2, q3 };
-			const rquat::Quat q = rquat::hermite(qk, tk, rotAt);
+			const float k6[6] = { tkOut[0], tk[0], tk[1], tk[2], tk[3], tkOut[1] };
+			const rquat::Quat q = weighQuat(qk, k6, rotAt,
+				rquat::hermite(qk, tk, rotAt),
+				wgt);
 			s_trace.orient = 'q';
 
 			if (isfinite(q.x) && isfinite(q.y) && isfinite(q.z) && isfinite(q.w))

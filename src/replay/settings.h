@@ -90,6 +90,12 @@ namespace rsettings
 		                // POSITIONAL layout, and there deleting this would shift
 		                // every value after it. Retire it once that reader goes.
 
+		// IGCS depth of field, per marker. Not the game's DoF - that one is a
+		// graphics setting and can be locked out entirely; this drives the ReShade
+		// add-on's aperture during a depth-of-field render.
+		P_DOF_AF,       // 0/1: measure focus in the world, at frame centre
+		P_DOF_DELTA,    // manual focus, as IGCS disparity (its FocusDelta)
+
 		P_COUNT
 	};
 

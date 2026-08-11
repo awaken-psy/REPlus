@@ -150,6 +150,7 @@ On by default; takes over markers set to **Smooth** blend.
 | Spline Path / Rotation / Zoom | which channels the curve drives |
 | Curve Shape | Uniform / Centripetal / Chordal — tension |
 | Speed Profile | Natural / Continuous / Per Segment — pacing |
+| Camera Weight | Off … Full — how much mass the camera has |
 
 **Speed Profile**
 
@@ -176,6 +177,32 @@ With evenly spaced markers that never reverse, all three are indistinguishable.
 > **Curve Shape has no effect under Natural pacing**, the default — a
 > time-parameterised Hermite has no knot spacing to choose. Switch to Continuous
 > or Per Segment for tension to apply.
+
+**Camera Weight**
+
+Catmull-Rom passes through every marker exactly, which reads as a weightless
+cursor snapping to coordinates. Weight blends the curve toward a B-spline, which
+is *carried past* its control points the way a rig with mass is — the markers
+become where you steered, not where the camera went.
+
+It moves **position, aim and zoom** together. Aim matters most: a heavy head has
+to be swung, and a body that lags while the aim snaps just drifts the subject in
+frame.
+
+The offset at a marker is one sixth of the second difference, scaled by the
+knob — so it is **corner-selective**. A 90° corner with 10 m legs passes about
+2.4 m inside the marker at Full. On a straight or gently curving run there is
+almost no second difference and Weight does nothing, which is right: mass only
+fights you when you change direction.
+
+> Applies **while playing only**. Parked, the camera sits exactly where you put
+> it, so what you frame is what the marker records.
+
+A B-spline undershoots but never overshoots — it cannot leave the region bounded
+by the markers. Real mass also carries *past* when the steering stops; that half
+needs a stateful spring, which could not be re-rendered deterministically. If a
+shot wants overshoot, place the marker beyond the target and let the undershoot
+land it.
 
 Per marker: override curve shape, add ease-in/ease-out, or force stock behaviour
 for one segment.
@@ -481,7 +508,7 @@ of ready-made ffmpeg command lines. Audio works here too — it lands as
 it onto whichever conform you pick.
 
 The capture is identical either way. Codecs come from `presets\` — `h264`,
-`h265`, `nvenc_hevc`, `prores_hq`, `lossless` — selected with
+`h265`, `nvenc_hevc`, `prores_hq`, `prores_4444`, `lossless` — selected with
 `RenderVideoPreset=h265`, or write ffmpeg arguments directly into
 `RenderVideoArgs`. Edited presets persist; a deleted one is rewritten.
 
@@ -564,6 +591,25 @@ aperture order. Both halves matter: an uneven spread beads the smear into
 separate ghosts, and time that tracks aperture radius makes a moving subject
 sweep radially — tight bokeh at one end of the trail, wide at the other.
 
+**Focus, per marker**
+
+Under **Rockstar Editor+ → Depth of Field** in the marker menu:
+
+| | |
+|---|---|
+| Autofocus | measure focus in the world each frame, at the centre of frame |
+| Focus Distance | manual focus, in the add-on's own disparity units |
+
+Both are per marker. Focus Distance is **interpolated between markers**, so two
+different values across a shot give a focus pull. A marker with nothing set
+holds the previous focus rather than racking back to the default.
+
+To set one by hand: open a depth-of-field session, focus by eye, note the panel's
+Focus Delta, close the session and enter it on the marker. That number is a
+**disparity, not a distance** — it scales with the aperture, so the panel's Max
+Bokeh Size has to match `RenderDofBokehSize` or every value will be out by the
+same ratio.
+
 > The slider only appears when the connected camera tools can step a clock,
 > which outside this mod is essentially never — so on any other game the panel
 > looks exactly as it did.
@@ -588,6 +634,7 @@ Both files live in `RockstarEditorPlus\`, beside the `.asi`.
 | `SmoothSpeedProfile` | 1 | one speed curve across markers |
 | `ArcLengthRemap` | 1 | per-segment fallback, used when both above are 0 |
 | `Alpha` | 1 | tension: 0 uniform / 0.5 centripetal / 1 chordal |
+| `SplineWeight` | 0 | camera mass on playback: 0 hits markers, 1 carried past |
 | `ShakeSimpleMode` | 1 | 0 = Sway/Jitter model |
 | `ShakeAmplitude` | 1.0 | degrees |
 | `ShakeFrequency` | 0.35 | hertz |

@@ -111,24 +111,31 @@ namespace spline
 	//
 	// The pyramid is run on the COEFFICIENTS rather than on points, so one
 	// function serves position, FOV and orientation and they cannot disagree.
-	inline void bsplineW(const float k[4], float u, float w[4])
+	// k6 = the SIX knots a cubic span needs, in order, with the span itself
+	// between k6[2] and k6[3]. The caller supplies the outer two because only it
+	// knows whether a real neighbour exists.
+	//
+	// They used to be MIRRORED in here, and that was the second keyframe artefact:
+	// the outer knots influence the span endpoints, and adjacent windows reflect
+	// DIFFERENT ones - marker n is reached once via a knot reflected past its
+	// right neighbour and once via one reflected past its left. Two fabricated
+	// values for the same instant, so the two sides of the marker disagreed and
+	// Full jumped. With real neighbours both windows use the same four spacings
+	// around the shared marker and land on the same point.
+	inline void bsplineW(const float k6[6], float u, float w[4])
 	{
-		// Outer knots mirrored - a cubic span needs six, and reflecting keeps the
-		// end spans finite instead of collapsing a denominator to zero.
-		const float km1 = k[0] - (k[1] - k[0]);
-		const float k4  = k[3] + (k[3] - k[2]);
 		auto den = [](float a, float b) { const float d = b - a; return (d > 1e-6f || d < -1e-6f) ? d : 1e-6f; };
 		auto mix = [](const float a[4], const float b[4], float t, float o[4])
 		{ for (int i = 0; i < 4; ++i) o[i] = a[i] + (b[i] - a[i]) * t; };
 
 		float c0[4]={1,0,0,0}, c1[4]={0,1,0,0}, c2[4]={0,0,1,0}, c3[4]={0,0,0,1};
 		float n0[4], n1[4], n2[4], m0[4], m1[4];
-		mix(c0, c1, (u - km1 ) / den(km1 , k[2]), n0);
-		mix(c1, c2, (u - k[0]) / den(k[0], k[3]), n1);
-		mix(c2, c3, (u - k[1]) / den(k[1], k4  ), n2);
-		mix(n0, n1, (u - k[0]) / den(k[0], k[2]), m0);
-		mix(n1, n2, (u - k[1]) / den(k[1], k[3]), m1);
-		mix(m0, m1, (u - k[1]) / den(k[1], k[2]), w);
+		mix(c0, c1, (u - k6[0]) / den(k6[0], k6[3]), n0);
+		mix(c1, c2, (u - k6[1]) / den(k6[1], k6[4]), n1);
+		mix(c2, c3, (u - k6[2]) / den(k6[2], k6[5]), n2);
+		mix(n0, n1, (u - k6[1]) / den(k6[1], k6[3]), m0);
+		mix(n1, n2, (u - k6[2]) / den(k6[2], k6[4]), m1);
+		mix(m0, m1, (u - k6[2]) / den(k6[2], k6[3]), w);
 	}
 
 	inline Vec3 bspline(const Vec3& p0, const Vec3& p1,
@@ -146,7 +153,8 @@ namespace spline
 
 	inline Vec3 catmullRom(const Vec3& p0, const Vec3& p1,
 	                       const Vec3& p2, const Vec3& p3,
-	                       float t, float alpha, float weight)
+	                       float t, float alpha, float weight,
+	                       const Vec3* pm1 = nullptr, const Vec3* p4 = nullptr)
 	{
 		auto knot = [alpha](float ti, const Vec3& a, const Vec3& b) {
 			const float d = (b - a).length();
@@ -178,7 +186,11 @@ namespace spline
 		// with the control points while the B-spline's does not.
 		// The SAME knots the Catmull-Rom above just built, so both halves of the
 		// blend are parameterised identically and the seam is continuous.
-		const float kk[4] = { t0, t1, t2, t3 };
+		// Extend the SAME centripetal chain outward. A real neighbour gives a real
+		// spacing; only a genuine clip end falls back to reflecting the interval.
+		const float tm1 = pm1 ? t0 - knot(0.0f, *pm1, p0) : t0 - (t1 - t0);
+		const float t4  = p4  ? knot(t3, p3, *p4)          : t3 + (t3 - t2);
+		const float kk[6] = { tm1, t0, t1, t2, t3, t4 };
 		float bw[4]; bsplineW(kk, tt, bw);
 		const Vec3 bs = p0 * bw[0] + p1 * bw[1] + p2 * bw[2] + p3 * bw[3];
 		return cr + (bs - cr) * (weight > 1.0f ? 1.0f : weight);
@@ -415,7 +427,8 @@ namespace spline
 	// 0.01 / 0.00 / 0.01 this way.
 	// -------------------------------------------------------------------------
 	inline Vec3 hermitePos(const Vec3 p[4], const float t[4], float now,
-	                       float weight)
+	                       float weight,
+	                       const float* tm1 = nullptr, const float* t4 = nullptr)
 	{
 		const float x[4] = { p[0].x, p[1].x, p[2].x, p[3].x };
 		const float y[4] = { p[0].y, p[1].y, p[2].y, p[3].y };
@@ -427,7 +440,12 @@ namespace spline
 		// parameter, so the B-spline has to be sampled at where `now` falls
 		// between the two bracketing knots - otherwise the two halves of the
 		// blend disagree about which part of the segment they are describing.
-		float bw[4]; bsplineW(t, now, bw);
+		const float k6[6] = {
+			tm1 ? *tm1 : t[0] - (t[1] - t[0]),
+			t[0], t[1], t[2], t[3],
+			t4  ? *t4  : t[3] + (t[3] - t[2]),
+		};
+		float bw[4]; bsplineW(k6, now, bw);
 		const Vec3 bs = p[0]*bw[0] + p[1]*bw[1] + p[2]*bw[2] + p[3]*bw[3];
 		return hp + (bs - hp) * (weight > 1.0f ? 1.0f : weight);
 	}
@@ -445,14 +463,15 @@ namespace spline
 
 	inline float segmentLength(const Vec3& p0, const Vec3& p1,
 	                           const Vec3& p2, const Vec3& p3, float alpha,
-	                           float weight)
+	                           float weight,
+	                           const Vec3* pm1 = nullptr, const Vec3* p4 = nullptr)
 	{
 		constexpr int SAMPLES = kArcSamples;
 		float total = 0.0f;
-		Vec3 prev = catmullRom(p0, p1, p2, p3, 0.0f, alpha, weight);
+		Vec3 prev = catmullRom(p0, p1, p2, p3, 0.0f, alpha, weight, pm1, p4);
 		for (int i = 1; i <= SAMPLES; ++i)
 		{
-			const Vec3 cur = catmullRom(p0, p1, p2, p3, (float)i / SAMPLES, alpha, weight);
+			const Vec3 cur = catmullRom(p0, p1, p2, p3, (float)i / SAMPLES, alpha, weight, pm1, p4);
 			total += (cur - prev).length();
 			prev = cur;
 		}
@@ -462,16 +481,17 @@ namespace spline
 	// Invert "distance along this segment" back to a curve parameter.
 	inline float paramAtDistance(const Vec3& p0, const Vec3& p1,
 	                             const Vec3& p2, const Vec3& p3,
-	                             float dist, float alpha, float weight)
+	                             float dist, float alpha, float weight,
+	                             const Vec3* pm1 = nullptr, const Vec3* p4 = nullptr)
 	{
 		constexpr int SAMPLES = kArcSamples;
 		float acc[SAMPLES + 1];
 		acc[0] = 0.0f;
 
-		Vec3 prev = catmullRom(p0, p1, p2, p3, 0.0f, alpha, weight);
+		Vec3 prev = catmullRom(p0, p1, p2, p3, 0.0f, alpha, weight, pm1, p4);
 		for (int i = 1; i <= SAMPLES; ++i)
 		{
-			const Vec3 cur = catmullRom(p0, p1, p2, p3, (float)i / SAMPLES, alpha, weight);
+			const Vec3 cur = catmullRom(p0, p1, p2, p3, (float)i / SAMPLES, alpha, weight, pm1, p4);
 			acc[i] = acc[i - 1] + (cur - prev).length();
 			prev = cur;
 		}
@@ -513,16 +533,17 @@ namespace spline
 	// -------------------------------------------------------------------------
 	inline float arcLengthRemap(const Vec3& p0, const Vec3& p1,
 	                            const Vec3& p2, const Vec3& p3,
-	                            float t, float alpha, float weight)
+	                            float t, float alpha, float weight,
+	                            const Vec3* pm1 = nullptr, const Vec3* p4 = nullptr)
 	{
 		constexpr int SAMPLES = kArcSamples;
 		float acc[SAMPLES + 1];
 		acc[0] = 0.0f;
 
-		Vec3 prev = catmullRom(p0, p1, p2, p3, 0.0f, alpha, weight);
+		Vec3 prev = catmullRom(p0, p1, p2, p3, 0.0f, alpha, weight, pm1, p4);
 		for (int i = 1; i <= SAMPLES; ++i)
 		{
-			const Vec3 cur = catmullRom(p0, p1, p2, p3, (float)i / SAMPLES, alpha, weight);
+			const Vec3 cur = catmullRom(p0, p1, p2, p3, (float)i / SAMPLES, alpha, weight, pm1, p4);
 			acc[i] = acc[i - 1] + (cur - prev).length();
 			prev = cur;
 		}

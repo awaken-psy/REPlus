@@ -33,7 +33,7 @@ namespace fxcapture
 		// the fields are appended, so an older add-on simply never looks at them
 		// and the capture protocol is unchanged. It is here to be seen in a log
 		// when a pair does turn out to be mismatched.
-		constexpr uint32_t kVersion = 10;
+		constexpr uint32_t kVersion = 12;
 
 		// One place, always, next to the exe. Every render is a numbered
 		// subfolder inside it.
@@ -396,7 +396,8 @@ namespace fxcapture
 	}
 
 	uint32_t dofRequest(float shutterMs, float bokehSize, int quality,
-	                    bool autofocus, float focusX, float focusY)
+	                    bool autofocus, float focusX, float focusY,
+	                    float focusDelta)
 	{
 		if (!s_block) return 0;
 
@@ -410,6 +411,7 @@ namespace fxcapture
 		s_block->dofQuality   = (uint32_t)quality;
 		s_block->dofAutofocus = autofocus ? 1u : 0u;
 		s_block->dofFocusX    = focusX;
+		s_block->dofFocusDelta = focusDelta;
 		s_block->dofFocusY    = focusY;
 
 		// Never 0 - that value is reserved for "no pass wanted", and is how a
@@ -424,6 +426,18 @@ namespace fxcapture
 	bool dofDone(uint32_t seq)
 	{
 		return s_block && seq != 0 && s_block->dofDoneSeq == seq;
+	}
+
+	bool liveFocus(float* delta, float* bokeh)
+	{
+		if (!s_block) return false;
+		const float b = s_block->dofLiveBokeh;
+		// A zero aperture is the add-on never having published, not a lens set to
+		// nothing - and it is also the divisor the caller is about to use.
+		if (!(b > 1e-6f)) return false;
+		if (delta) *delta = s_block->dofLiveFocusDelta;
+		if (bokeh) *bokeh = b;
+		return true;
 	}
 
 	uint32_t dofStatus()

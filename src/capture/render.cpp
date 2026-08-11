@@ -81,6 +81,24 @@ namespace render
 		// the render settings - the panel's own value is not consulted in this
 		// mode, and two of them fighting would show up as blur that does not
 		// match the number anyone set.
+		// Focus for the frame about to be rendered, per marker.
+		//
+		// Resolved by the spline update, which already has the marker window and
+		// the clock. Falls back to the render's own configured values when no clip
+		// has been played yet, so a render started cold behaves as it always did.
+		bool dofAutofocusNow()
+		{
+			bool af = s_cfg.dofAutofocus;
+			smoothblend::focusNow(nullptr, &af);
+			return af;
+		}
+		float dofFocusDeltaNow()
+		{
+			float d = Config::get().renderDofFocusDelta;
+			smoothblend::focusNow(&d, nullptr);
+			return d;
+		}
+
 		float dofShutterMs()
 		{
 			if (s_cfg.fps <= 0.0f) return 0.0f;
@@ -3203,7 +3221,7 @@ namespace render
 						"dof-seq: frame %d requesting pass, clock %.1f (settle done)",
 						s_frame, clockNow());
 				s_dofSeq     = fxcapture::dofRequest(dofShutterMs(), s_cfg.dofBokehSize, s_cfg.dofQuality,
-						s_cfg.dofAutofocus, s_cfg.dofFocusX, s_cfg.dofFocusY);
+						dofAutofocusNow(), s_cfg.dofFocusX, s_cfg.dofFocusY, dofFocusDeltaNow());
 				s_dofStartMs = GetTickCount();
 				if (s_dofSeq == 0)
 				{
@@ -3243,7 +3261,7 @@ namespace render
 					"(%d of %d). The add-on's log names the reason.",
 					s_frame, s_dofRetries, kDofMaxRetries);
 				s_dofSeq     = fxcapture::dofRequest(dofShutterMs(), s_cfg.dofBokehSize, s_cfg.dofQuality,
-						s_cfg.dofAutofocus, s_cfg.dofFocusX, s_cfg.dofFocusY);
+						dofAutofocusNow(), s_cfg.dofFocusX, s_cfg.dofFocusY, dofFocusDeltaNow());
 				s_dofStartMs = GetTickCount();
 				return;
 			}

@@ -128,6 +128,25 @@ struct FxCaptureBlock
 	// struct is 4-byte packed and everything else in it is 32 bits.
 	uint32_t asiModuleLo;    // ASI -> addon: HMODULE of the tool to bind to,
 	uint32_t asiModuleHi;    // 0 = no preference, use whatever was found
+
+	// --- manual focus, per marker (v11) ------------------------------------
+	//
+	// Appended, like every field before it, so a mismatched pairing still
+	// agrees about everything older. Ignored while dofAutofocus is 1.
+	//
+	// In the add-on's own DISPARITY units, not metres - it is the number its
+	// Focus Delta slider shows. Sending a distance instead would mean the ASI
+	// had to know maxBokehSize and the frame's fov, which is exactly the
+	// coupling the autofocus split above exists to avoid.
+	float    dofFocusDelta;
+
+	// --- what the lens is doing RIGHT NOW (v12) ----------------------------
+	// Published every present so a camera tool can capture the focus a user just
+	// dialled by eye. The aperture goes with it because FocusDelta is a
+	// DISPARITY, not a distance - it scales with maxBokehSize, so a delta
+	// without the aperture it was measured at means nothing.
+	float    dofLiveFocusDelta;
+	float    dofLiveBokeh;
 };
 #pragma pack(pop)
 
@@ -199,7 +218,8 @@ namespace fxcapture
 	// Ask the add-on to accumulate one frame across the aperture instead of the
 	// renderer accumulating it across time. Returns the request id to wait on.
 	uint32_t dofRequest(float shutterMs, float bokehSize, int quality,
-	                    bool autofocus, float focusX, float focusY);
+	                    bool autofocus, float focusX, float focusY,
+	                    float focusDelta);
 
 	// Has that request finished and left its image on screen?
 	bool dofDone(uint32_t seq);
@@ -207,6 +227,16 @@ namespace fxcapture
 	// 0 idle, 1 running, 2 done, 3 failed. Separates "a 50-second frame is still
 	// going" from "the pass died", which a timeout alone cannot.
 	uint32_t dofStatus();
+
+	// The lens as it stands in the add-on right now - the focus a user has just
+	// dialled by eye, and the aperture it was dialled AT.
+	//
+	// Both, always. FocusDelta is a disparity that scales with maxBokehSize, so
+	// capturing a delta measured at one aperture and replaying it at another
+	// focuses somewhere else entirely - by exactly the ratio of the two.
+	//
+	// False when no add-on is present or it has never reported an aperture.
+	bool liveFocus(float* delta, float* bokeh);
 
 	// Tear any pass down. Idempotent - the end of a render, an abort and a
 	// cancel all come through here.

@@ -777,8 +777,20 @@ struct Config
 	float renderDofBokehSize = 0.15f;  // aperture diameter. THE creative control
 	int   renderDofQuality   = 12;     // rings; the sample total follows from it
 	bool  renderDofAutofocus = true;   // measure focus in the world each frame
-	float renderDofFocusX    = 0.5f;   // where to measure, across the frame
-	float renderDofFocusY    = 0.5f;   // and down it
+	// ALWAYS 0.5/0.5 - autofocus measures at the centre of frame.
+	//
+	// Kept as fields rather than deleted because the shared capture block's
+	// layout is fixed and byte-identical across three programs; the controls
+	// that used to move them are gone, not the wire format. An off-centre
+	// measuring point was never useful: you aim the camera at the subject.
+	const float renderDofFocusX = 0.5f;
+	const float renderDofFocusY = 0.5f;
+
+	// Manual focus, in the add-on's own disparity units - the number its Focus
+	// Delta slider shows. Used when autofocus is off. This is the DEFAULT a
+	// marker inherits; the per-marker rows are what a shot actually uses, and
+	// two different values across a shot give a focus pull.
+	float renderDofFocusDelta = 0.05f;
 
 	float renderFps          = 30.0f;
 	int   renderSamples      = 64;
@@ -1149,8 +1161,6 @@ struct Config
 		if (renderDofBokehSize > 10.0f)  renderDofBokehSize = 10.0f;
 		if (renderDofQuality   < 1)      renderDofQuality   = 1;
 		if (renderDofQuality   > 100)    renderDofQuality   = 100;
-		if (!(renderDofFocusX >= 0.0f && renderDofFocusX <= 1.0f)) renderDofFocusX = 0.5f;
-		if (!(renderDofFocusY >= 0.0f && renderDofFocusY <= 1.0f)) renderDofFocusY = 0.5f;
 
 		if (renderSamples < 1)    renderSamples = 1;
 		if (renderSamples > 4096) renderSamples = 4096;
@@ -1242,8 +1252,7 @@ struct Config
 		renderDofBokehSize = rFloat("RenderDofBokehSize", renderDofBokehSize);
 		renderDofQuality   = rInt  ("RenderDofQuality",   renderDofQuality);
 		renderDofAutofocus = rBool ("RenderDofAutofocus", renderDofAutofocus);
-		renderDofFocusX    = rFloat("RenderDofFocusX",    renderDofFocusX);
-		renderDofFocusY    = rFloat("RenderDofFocusY",    renderDofFocusY);
+		renderDofFocusDelta= rFloat("RenderDofFocusDelta", renderDofFocusDelta);
 
 		{
 			char m[32]{};

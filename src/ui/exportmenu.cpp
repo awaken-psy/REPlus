@@ -96,8 +96,6 @@ namespace exportmenu
 			ROW_DOF_SIZE,     // renderDofBokehSize   - DepthOfField mode only
 			ROW_DOF_QUALITY,  // renderDofQuality
 			ROW_DOF_AF,       // renderDofAutofocus
-			ROW_DOF_FX,       // renderDofFocusX
-			ROW_DOF_FY,       // renderDofFocusY
 			ROW_SAMPLES,      // renderSamples
 			ROW_SHUTTER,      // renderShutter
 			ROW_HIGHLIGHT,    // renderHighlight
@@ -322,8 +320,6 @@ namespace exportmenu
 			case ROW_DOF_SIZE:  return "Aperture";
 			case ROW_DOF_QUALITY: return "Bokeh Quality";
 			case ROW_DOF_AF:    return "Autofocus";
-			case ROW_DOF_FX:    return "Focus Point X";
-			case ROW_DOF_FY:    return "Focus Point Y";
 			case ROW_SAMPLES:   return "Motion Blur";
 			case ROW_SHUTTER:   return "Shutter";
 			case ROW_HIGHLIGHT: return "Highlight Boost";
@@ -377,13 +373,6 @@ namespace exportmenu
 				return buf;
 			case ROW_DOF_AF:
 				return c.renderDofAutofocus ? "On" : "Off";
-			case ROW_DOF_FX:
-				snprintf(buf, sizeof(buf), "%.2f", c.renderDofFocusX);
-				return buf;
-			case ROW_DOF_FY:
-				snprintf(buf, sizeof(buf), "%.2f", c.renderDofFocusY);
-				return buf;
-
 			case ROW_CAPTURE:
 				// Named the way Render.ini names them, so the row and the key
 				// cannot be mistaken for two different settings.
@@ -552,45 +541,22 @@ namespace exportmenu
 				       "everything the same distance away comes out sharp too.\n\n"
 				       "Off leaves focus wherever the add-on's panel last set it.";
 
-			case ROW_DOF_FX:
-			case ROW_DOF_FY:
-				return "Where in the frame to measure focus. 0.5, 0.5 is the centre; "
-				       "0,0 is the top left.\n\n"
-				       "Put it on the part that must be sharp - a face rather than the "
-				       "middle of a body, or the plane lands somewhere behind the eyes. "
-				       "A crosshair shows where it is while a depth-of-field session "
-				       "is open in ReShade.";
-
 			case ROW_CAPTURE:
 				// Contrasts BOTH modes rather than describing the selected one,
 				// for the state-free reason above - and it is the better shape
 				// anyway: on a two-way choice what you want to know is what you
 				// would be switching TO.
-				return "How the sub-frames of each output frame are gathered.\n\n"
-				       "Walking pauses the clip and seeks to each sub-frame's exact "
-				       "instant. The shutter is mathematically exact and frame times are "
-				       "deterministic, but a seeked frame is COLD: particles do not step, "
-				       "and anything with temporal history - TAA, SSR reprojection, the "
-				       "ray-traced accumulation on Enhanced - is reset at every sample.\n\n"
-				       "Sliding plays the clip in slow motion and exposes consecutive "
-				       "presented frames instead, so all of that keeps simulating. Its "
-				       "shutter is approximate - samples land where the game presented "
-				       "rather than on exact midpoints - and it is usually the FASTER of "
-				       "the two: it needs Samples/Shutter frames where Walking needs a "
-				       "settle frame per sample as well - one to redraw at the seeked "
-				       "time, one to capture it. At a 360-degree shutter that is roughly "
-				       "2x; at 180 the two are level, and below that Walking wins.\n\n"
-				       "Depth of Field is Walking with a real lens. Instead of one "
-				       "image per sub-frame, the ReShade add-on accumulates each output "
-				       "frame across an actual aperture, so defocus comes from geometry "
-				       "rather than from blurring a finished picture - foreground and "
-				       "background occlude each other correctly and highlights bloom into "
-				       "the aperture's own shape. Focus is measured in the world, so it "
-				       "follows the subject through the shot.\n\n"
-				       "It is by far the slowest: every frame is a whole aperture sweep, "
-				       "which is tens of seconds, so a shot measured in minutes elsewhere "
-				       "is measured in hours here. Samples is ignored - the aperture does "
-				       "the sampling - and Shutter still sets the exposure.";
+				return "How each output frame's sub-frames are gathered.\n\n"
+					"Walking pauses and seeks to each sub-frame's exact instant: exact "
+					"shutter, deterministic times. But a seeked frame is COLD - particles "
+					"do not step, and TAA, SSR and RT history reset every sample.\n\n"
+					"Sliding plays the clip slowly and exposes consecutive presented "
+					"frames, so all of that keeps simulating. Approximate shutter. Usually "
+					"faster - Walking needs a settle frame per sample too.\n\n"
+					"Depth of Field is Walking with a real lens: the add-on sweeps an "
+					"actual aperture per frame, so defocus comes from geometry. VERY "
+					"EXPENSIVE - tens of seconds a frame, so ONE MINUTE of footage is "
+					"TENS OF HOURS. Samples is ignored; Shutter still sets the exposure.";
 
 			case ROW_SAMPLES:
 				if (c.renderCaptureMode == 2)
@@ -803,26 +769,6 @@ namespace exportmenu
 				c.writeRenderBool("RenderDofAutofocus", c.renderDofAutofocus);
 				break;
 
-			case ROW_DOF_FX:
-			{
-				float v = c.renderDofFocusX + (delta > 0 ? 0.02f : -0.02f);
-				if (v < 0.0f) v = 0.0f;
-				if (v > 1.0f) v = 1.0f;
-				c.renderDofFocusX = v;
-				c.writeRenderFloat("RenderDofFocusX", v);
-				break;
-			}
-
-			case ROW_DOF_FY:
-			{
-				float v = c.renderDofFocusY + (delta > 0 ? 0.02f : -0.02f);
-				if (v < 0.0f) v = 0.0f;
-				if (v > 1.0f) v = 1.0f;
-				c.renderDofFocusY = v;
-				c.writeRenderFloat("RenderDofFocusY", v);
-				break;
-			}
-
 			case ROW_CAPTURE:
 				// Three-way now, so it CYCLES rather than picking by sign. Depth
 				// of field is deliberately last: it is the one that turns a
@@ -969,8 +915,8 @@ namespace exportmenu
 				return false;
 
 			// The lens rows only mean anything in Depth of Field mode.
-			if ((row == ROW_DOF_SIZE || row == ROW_DOF_QUALITY || row == ROW_DOF_AF ||
-			     row == ROW_DOF_FX   || row == ROW_DOF_FY) && c.renderCaptureMode != 2)
+			if ((row == ROW_DOF_SIZE || row == ROW_DOF_QUALITY || row == ROW_DOF_AF)
+			    && c.renderCaptureMode != 2)
 				return false;
 
 			// The aperture does the sampling there, and Samples is pinned to 1.
@@ -978,8 +924,6 @@ namespace exportmenu
 				return false;
 
 			// A focus point you cannot move is not a setting.
-			if ((row == ROW_DOF_FX || row == ROW_DOF_FY) && !c.renderDofAutofocus)
-				return false;
 
 			return true;
 		}
