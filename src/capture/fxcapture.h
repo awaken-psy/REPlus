@@ -115,6 +115,19 @@ struct FxCaptureBlock
 	uint32_t dofAutofocus;   // 1 = measure focus in the world each frame
 	float    dofFocusX;      // where to measure, across the frame 0..1
 	float    dofFocusY;      // and down it
+
+	// --- which camera tool owns the interface (v10) ------------------------
+	//
+	// The add-on binds to the FIRST loaded module exporting
+	// IGCS_StartScreenshotSession, and more than one mod exports it - NVE does.
+	// Load order then decides whose camera a depth-of-field session drives, and
+	// re-scanning cannot break the tie because the scan is what picks wrong.
+	//
+	// So the ASI that is driving a render names itself here, and the add-on
+	// binds to that module for the duration. Split into two halves because this
+	// struct is 4-byte packed and everything else in it is 32 bits.
+	uint32_t asiModuleLo;    // ASI -> addon: HMODULE of the tool to bind to,
+	uint32_t asiModuleHi;    // 0 = no preference, use whatever was found
 };
 #pragma pack(pop)
 

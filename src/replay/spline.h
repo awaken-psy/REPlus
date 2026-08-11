@@ -76,9 +76,77 @@ namespace spline
     //
 	// t is in [0,1] across the P1 -> P2 segment.
 	// -------------------------------------------------------------------------
+	// -------------------------------------------------------------------------
+	// Uniform cubic B-spline over the same four control points.
+	//
+	// APPROXIMATING, not interpolating: it does not pass through p1 or p2, it
+	// leans toward them and gets carried past. That miss is the point. The
+	// cubic B-spline basis IS the fourfold convolution of a box function, so
+	// this is literally a low-pass filter applied to the control polygon - the
+	// lagged, heavy version of the same path. It buys the feel of a damped
+	// spring chasing the markers while staying a pure function of t, which a
+	// spring is not: a stateful smoother would be unreproducible across a
+	// re-render, and would converge to the unlagged path when a renderer holds
+	// the playhead still - which is the failure mode we are avoiding, not one
+	// to reintroduce.
+	//
+	// Uniform by construction, so alpha has no analogue here and is not taken.
+	// Blending a centripetal Catmull-Rom against a uniform B-spline is fine -
+	// both are cubics over p0..p3 and t means the same thing in both.
+	// -------------------------------------------------------------------------
+	// The four cubic B-spline weights, NON-UNIFORM - de Boor over the real
+	// knot spacing k[0..3], evaluated at u inside the span [k1,k2].
+	//
+	// A UNIFORM basis was the first attempt and it kicked at every keyframe.
+	// The basis is C2 in its own parameter, but that parameter is normalised
+	// per segment, so d(param)/d(time) is 1/segmentDuration and STEPS at each
+	// marker whenever two segments differ in length. Position stayed continuous
+	// - both sides evaluate (p1+4p2+p3)/6 - while VELOCITY did not. It scaled
+	// with the weight because the Catmull-Rom term buries it until the B-spline
+	// term dominates, which is why it only showed at Heavy and Full.
+	//
+	// Centripetal alpha solves this for Catmull-Rom; the uniform basis had no
+	// equivalent. de Boor takes the knots themselves, so the time derivative is
+	// continuous by construction at any weight.
+	//
+	// The pyramid is run on the COEFFICIENTS rather than on points, so one
+	// function serves position, FOV and orientation and they cannot disagree.
+	inline void bsplineW(const float k[4], float u, float w[4])
+	{
+		// Outer knots mirrored - a cubic span needs six, and reflecting keeps the
+		// end spans finite instead of collapsing a denominator to zero.
+		const float km1 = k[0] - (k[1] - k[0]);
+		const float k4  = k[3] + (k[3] - k[2]);
+		auto den = [](float a, float b) { const float d = b - a; return (d > 1e-6f || d < -1e-6f) ? d : 1e-6f; };
+		auto mix = [](const float a[4], const float b[4], float t, float o[4])
+		{ for (int i = 0; i < 4; ++i) o[i] = a[i] + (b[i] - a[i]) * t; };
+
+		float c0[4]={1,0,0,0}, c1[4]={0,1,0,0}, c2[4]={0,0,1,0}, c3[4]={0,0,0,1};
+		float n0[4], n1[4], n2[4], m0[4], m1[4];
+		mix(c0, c1, (u - km1 ) / den(km1 , k[2]), n0);
+		mix(c1, c2, (u - k[0]) / den(k[0], k[3]), n1);
+		mix(c2, c3, (u - k[1]) / den(k[1], k4  ), n2);
+		mix(n0, n1, (u - k[0]) / den(k[0], k[2]), m0);
+		mix(n1, n2, (u - k[1]) / den(k[1], k[3]), m1);
+		mix(m0, m1, (u - k[1]) / den(k[1], k[2]), w);
+	}
+
+	inline Vec3 bspline(const Vec3& p0, const Vec3& p1,
+	                    const Vec3& p2, const Vec3& p3, float t)
+	{
+		const float t2 = t * t;
+		const float t3 = t2 * t;
+		const float k  = 1.0f / 6.0f;
+		const float b0 = (1.0f - 3.0f * t + 3.0f * t2 -        t3) * k;
+		const float b1 = (4.0f            - 6.0f * t2 + 3.0f * t3) * k;
+		const float b2 = (1.0f + 3.0f * t + 3.0f * t2 - 3.0f * t3) * k;
+		const float b3 = (                                     t3) * k;
+		return p0 * b0 + p1 * b1 + p2 * b2 + p3 * b3;
+	}
+
 	inline Vec3 catmullRom(const Vec3& p0, const Vec3& p1,
 	                       const Vec3& p2, const Vec3& p3,
-	                       float t, float alpha)
+	                       float t, float alpha, float weight)
 	{
 		auto knot = [alpha](float ti, const Vec3& a, const Vec3& b) {
 			const float d = (b - a).length();
@@ -102,7 +170,18 @@ namespace spline
 		const Vec3 b1 = a1 * ((t2 - tt) / (t2 - t0)) + a2 * ((tt - t0) / (t2 - t0));
 		const Vec3 b2 = a2 * ((t3 - tt) / (t3 - t1)) + a3 * ((tt - t1) / (t3 - t1));
 
-		return b1 * ((t2 - tt) / (t2 - t1)) + b2 * ((tt - t1) / (t2 - t1));
+		const Vec3 cr = b1 * ((t2 - tt) / (t2 - t1)) + b2 * ((tt - t1) / (t2 - t1));
+		if (!(weight > 0.0f)) return cr;
+
+		// Blend the POSITIONS, not the basis matrices. There is no matrix to
+		// blend: alpha makes this Catmull-Rom non-uniform, so its basis changes
+		// with the control points while the B-spline's does not.
+		// The SAME knots the Catmull-Rom above just built, so both halves of the
+		// blend are parameterised identically and the seam is continuous.
+		const float kk[4] = { t0, t1, t2, t3 };
+		float bw[4]; bsplineW(kk, tt, bw);
+		const Vec3 bs = p0 * bw[0] + p1 * bw[1] + p2 * bw[2] + p3 * bw[3];
+		return cr + (bs - cr) * (weight > 1.0f ? 1.0f : weight);
 	}
 
 	// -------------------------------------------------------------------------
@@ -335,12 +414,22 @@ namespace spline
 	// velocity jump at three markers was 0.23 / 0.38 / 0.33 m/s that way and
 	// 0.01 / 0.00 / 0.01 this way.
 	// -------------------------------------------------------------------------
-	inline Vec3 hermitePos(const Vec3 p[4], const float t[4], float now)
+	inline Vec3 hermitePos(const Vec3 p[4], const float t[4], float now,
+	                       float weight)
 	{
 		const float x[4] = { p[0].x, p[1].x, p[2].x, p[3].x };
 		const float y[4] = { p[0].y, p[1].y, p[2].y, p[3].y };
 		const float z[4] = { p[0].z, p[1].z, p[2].z, p[3].z };
-		return Vec3(hermiteAt(t, x, now), hermiteAt(t, y, now), hermiteAt(t, z, now));
+		const Vec3 hp(hermiteAt(t, x, now), hermiteAt(t, y, now), hermiteAt(t, z, now));
+		if (!(weight > 0.0f)) return hp;
+
+		// The natural path is parameterised by TIME, not by a normalised segment
+		// parameter, so the B-spline has to be sampled at where `now` falls
+		// between the two bracketing knots - otherwise the two halves of the
+		// blend disagree about which part of the segment they are describing.
+		float bw[4]; bsplineW(t, now, bw);
+		const Vec3 bs = p[0]*bw[0] + p[1]*bw[1] + p[2]*bw[2] + p[3]*bw[3];
+		return hp + (bs - hp) * (weight > 1.0f ? 1.0f : weight);
 	}
 
 
@@ -355,14 +444,15 @@ namespace spline
 	inline constexpr int kArcSamples = 32;
 
 	inline float segmentLength(const Vec3& p0, const Vec3& p1,
-	                           const Vec3& p2, const Vec3& p3, float alpha)
+	                           const Vec3& p2, const Vec3& p3, float alpha,
+	                           float weight)
 	{
 		constexpr int SAMPLES = kArcSamples;
 		float total = 0.0f;
-		Vec3 prev = catmullRom(p0, p1, p2, p3, 0.0f, alpha);
+		Vec3 prev = catmullRom(p0, p1, p2, p3, 0.0f, alpha, weight);
 		for (int i = 1; i <= SAMPLES; ++i)
 		{
-			const Vec3 cur = catmullRom(p0, p1, p2, p3, (float)i / SAMPLES, alpha);
+			const Vec3 cur = catmullRom(p0, p1, p2, p3, (float)i / SAMPLES, alpha, weight);
 			total += (cur - prev).length();
 			prev = cur;
 		}
@@ -372,16 +462,16 @@ namespace spline
 	// Invert "distance along this segment" back to a curve parameter.
 	inline float paramAtDistance(const Vec3& p0, const Vec3& p1,
 	                             const Vec3& p2, const Vec3& p3,
-	                             float dist, float alpha)
+	                             float dist, float alpha, float weight)
 	{
 		constexpr int SAMPLES = kArcSamples;
 		float acc[SAMPLES + 1];
 		acc[0] = 0.0f;
 
-		Vec3 prev = catmullRom(p0, p1, p2, p3, 0.0f, alpha);
+		Vec3 prev = catmullRom(p0, p1, p2, p3, 0.0f, alpha, weight);
 		for (int i = 1; i <= SAMPLES; ++i)
 		{
-			const Vec3 cur = catmullRom(p0, p1, p2, p3, (float)i / SAMPLES, alpha);
+			const Vec3 cur = catmullRom(p0, p1, p2, p3, (float)i / SAMPLES, alpha, weight);
 			acc[i] = acc[i - 1] + (cur - prev).length();
 			prev = cur;
 		}
@@ -423,16 +513,16 @@ namespace spline
 	// -------------------------------------------------------------------------
 	inline float arcLengthRemap(const Vec3& p0, const Vec3& p1,
 	                            const Vec3& p2, const Vec3& p3,
-	                            float t, float alpha)
+	                            float t, float alpha, float weight)
 	{
 		constexpr int SAMPLES = kArcSamples;
 		float acc[SAMPLES + 1];
 		acc[0] = 0.0f;
 
-		Vec3 prev = catmullRom(p0, p1, p2, p3, 0.0f, alpha);
+		Vec3 prev = catmullRom(p0, p1, p2, p3, 0.0f, alpha, weight);
 		for (int i = 1; i <= SAMPLES; ++i)
 		{
-			const Vec3 cur = catmullRom(p0, p1, p2, p3, (float)i / SAMPLES, alpha);
+			const Vec3 cur = catmullRom(p0, p1, p2, p3, (float)i / SAMPLES, alpha, weight);
 			acc[i] = acc[i - 1] + (cur - prev).length();
 			prev = cur;
 		}

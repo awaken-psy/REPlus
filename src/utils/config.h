@@ -145,6 +145,18 @@ struct Config
 	// momentum to sweep around.
 	float alpha           = 1.0f;
 
+	// How heavy the camera is, 0 = today, 1 = full B-spline.
+	//
+	// Catmull-Rom hits every marker exactly, which reads as a weightless
+	// cursor snapping to coordinates. A B-spline is carried past them the way
+	// a rig with mass is, so the markers become where you STEERED rather than
+	// where the camera went. Missing them is the feature, not a tolerance.
+	//
+	// Global on purpose: it describes the rig, not a moment. Per-marker would
+	// arrive exactly at some markers and miss others, which looks like a bug,
+	// and would need the weight itself interpolated to avoid a shape pop.
+	float splineWeight    = 0.0f;
+
 	// Fit one monotone cubic through (marker time -> cumulative distance) so
 	// speed is continuous ACROSS markers, not just within one. This is what
 	// removes the kick at each keyframe; leave it on unless A/B testing.
@@ -528,7 +540,7 @@ struct Config
 			"RenderSettleSubFrames=%d%s; ...between blur sub-samples. Never 0\n"
 			"RenderHighlightBoost=%g%s; keeps specular streaks bright through accumulation\n"
 			"RenderJpeg=%d%s; 0 = PNG\n"
-			"RenderQuality=%d%s; JPEG only\n"
+			"RenderQuality=%d%s; JPEG only. Below 91 = chroma subsampled\n"
 			"; 0 auto (the add-on reads the back-buffer format) / 1 RGBA / 2 BGRA.\n"
 			"; Auto is known to get this wrong on Legacy, FiveM especially. Try 1, then 2.\n"
 			"RenderChannelOrder=%d%s; 0 auto / 1 RGBA / 2 BGRA\n"
@@ -542,7 +554,7 @@ struct Config
 			renderFps, "              ", renderSamples, "          ",
 			renderShutter, "          ", renderSettleFrames, "     ",
 			renderSettleSubFrames, "  ", renderHighlight, "   ",
-			renderJpeg ? 1 : 0, "               ", renderQuality, "            ",
+			renderJpeg ? 1 : 0, "               ", renderQuality, "           ",
 			renderChannelOrder, "      ",
 			renderHideHud ? 1 : 0, "            ",
 			exportCloseWhenDone ? 1 : 0, "      ",
@@ -568,10 +580,10 @@ struct Config
 			"RenderKeepFrames=%d%s; Video mode: keep the frames as well\n"
 			"; Empty = RockstarEditorPlus\\ffmpeg.exe, then beside the exe, then PATH.\n"
 			"FfmpegPath=%s\n\n"
-			"; Named preset from presets\\ (h264, h265, nvenc_hevc, prores_hq, lossless).\n"
-			"; A preset supplies both the args and the extension, overriding the two below.\n"
+			"; Named preset from presets\\ (h264, h265, nvenc_hevc, prores_hq,\n"
+			"; prores_4444, lossless). Blank it to use the two keys below instead.\n"
 			"RenderVideoPreset=%s\n\n"
-			"; Used when no preset is named. Ext must match the codec or ffmpeg refuses.\n"
+			"; IGNORED while a preset is named above - it supplies both of these.\n"
 			"RenderVideoArgs=%s\n"
 			"RenderVideoExt=%s\n\n"
 			"; ============================================================================\n"
@@ -784,7 +796,7 @@ struct Config
 	// single sharp frame.
 	int   renderSettleSubFrames = 1;
 	bool  renderJpeg         = false;
-	int   renderQuality      = 90;
+	int   renderQuality      = 100;
 	float renderHighlight    = 0.90f;
 	int   renderChannelOrder = 0;
 
@@ -1032,6 +1044,7 @@ struct Config
 		arcLengthRemap    = getBool("ArcLengthRemap", arcLengthRemap);
 		onlySmoothBlend   = getBool("OnlySmoothBlend", onlySmoothBlend);
 		alpha             = getFloat("Alpha", alpha);
+		splineWeight      = getFloat("SplineWeight", splineWeight);
 
 		unlimitedCameraDistance = getBool("UnlimitedCameraDistance", unlimitedCameraDistance);
 		streamingFocusOnCamera  = getBool("StreamingFocusOnCamera", streamingFocusOnCamera);
@@ -1336,6 +1349,8 @@ struct Config
 
 		if (alpha < 0.0f) alpha = 0.0f;
 		if (alpha > 1.0f) alpha = 1.0f;
+		if (splineWeight < 0.0f) splineWeight = 0.0f;
+		if (splineWeight > 1.0f) splineWeight = 1.0f;
 	}
 
 	static Config& get()

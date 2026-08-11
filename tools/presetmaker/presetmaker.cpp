@@ -844,9 +844,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             }
             py += 30;
         }
-        g_pnote = keep(mk("STATIC", "", WS_VISIBLE, 152, py + 4, 540, 34, hwnd, ID_PNOTE));
+        // A read-only multiline EDIT, not a STATIC - the same reason the help
+        // panel below gives, which this control predated and did not follow.
+        // A static clips silently and no height stays safe: ProRes alone is
+        // three paragraphs and lost its last two lines. Scrolling degrades;
+        // clipping just hides the sentence that explains the setting.
+        const int kNoteH = 64;
+        g_pnote = keep(mk("EDIT", "", WS_VISIBLE | WS_BORDER | ES_MULTILINE |
+                          ES_READONLY | WS_VSCROLL, 152, py + 4, 540, kNoteH,
+                          hwnd, ID_PNOTE));
         g_pargs = keep(mk("EDIT", "", WS_VISIBLE | WS_BORDER | ES_MULTILINE | ES_READONLY,
-                          152, py + 42, 540, 60, hwnd, ID_PARGS));
+                          152, py + 8 + kNoteH, 540, 60, hwnd, ID_PARGS));
         keep(mk("BUTTON", "Save preset", WS_VISIBLE | BS_PUSHBUTTON, 16, 272, 120, 26, hwnd, ID_PSAVE));
         keep(mk("BUTTON", "Delete", WS_VISIBLE | BS_PUSHBUTTON, 16, 302, 120, 26, hwnd, ID_PDEL));
 
@@ -855,7 +863,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         // Positioned from where the tallest tab actually ended, not from
         // constants. Hardcoding these put the help and path labels straight
         // through the last two wide rows.
-        const int presetBottom = py + 42 + 60;          // args box on the preset tab
+        const int presetBottom = py + 8 + kNoteH + 60;  // args box on the preset tab
         int bottom = (wideY > presetBottom ? wideY : presetBottom) + 10;
 
         // A read-only multiline EDIT, not a STATIC.

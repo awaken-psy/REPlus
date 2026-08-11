@@ -623,13 +623,18 @@ namespace exportmenu
 			case ROW_SHUTTER:
 				if (c.renderCaptureMode == 2)
 					return "How much of each frame interval the shutter is open. In Depth "
-					       "of Field mode this is what produces the motion blur: the "
-					       "aperture samples are spread across this window, so 1.0 smears "
-					       "a full frame of movement into every picture and 0.25 gives a "
-					       "crisp, staccato look.\n\nIt costs nothing either way - the "
-					       "sample count is unchanged, only where in time the samples land. "
-					       "The add-on's own Shutter is ignored while a render is driving; "
-					       "this is the one that applies.";
+					       "of Field mode this is where the motion blur comes from: the "
+					       "aperture samples are spread across this window.\n\nIt costs no "
+					       "extra samples - only where in time they land - but it does spend "
+					       "them. Each point on the aperture renders at a different instant, "
+					       "so once the camera moves further during the shutter than the "
+					       "bokeh is wide, the motion swamps the aperture pattern and clean "
+					       "bokeh turns to scatter.\n\nROTATION is the worst case: a pan "
+					       "displaces the whole frame, near and far alike, where a dolly "
+					       "only shifts things by parallax. If a panning shot shows streaked "
+					       "or grainy bokeh: shorten this, raise Bokeh Quality, or open the "
+					       "Aperture so the pattern dominates the movement again.\n\nThe "
+					       "add-on's own Shutter is ignored while a render is driving.";
 				// Depends on MOTION BLUR, not on itself - so the pane is correct
 				// as soon as you arrive here, which is the rule in rowHelp's note.
 				if (c.renderSamples <= 1)

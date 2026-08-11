@@ -54,8 +54,16 @@ namespace videoout
 				  "Similar quality at roughly half the size, slower to encode." },
 				{ "nvenc_hevc", "mp4", "-c:v hevc_nvenc -cq 20 -preset p7 -pix_fmt yuv420p",
 				  "GPU encode - much faster, needs an NVIDIA card." },
-				{ "prores_hq",  "mov", "-c:v prores_ks -profile:v 3 -pix_fmt yuv422p10le",
-				  "ProRes 422 HQ, 10-bit, for grading. Large files." },
+				{ "prores_hq",  "mov", "-c:v prores_ks -profile:v 3 -pix_fmt yuv422p10le"
+				  " -sws_flags +accurate_rnd+full_chroma_int"
+				  " -colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv",
+				  "ProRes 422 HQ, 10-bit. 4:2:2 - halves colour resolution, which "
+				  "shreds saturated text. Fine for ordinary footage." },
+				{ "prores_4444","mov", "-c:v prores_ks -profile:v 4 -pix_fmt yuv444p10le"
+				  " -sws_flags +accurate_rnd+full_chroma_int"
+				  " -colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv",
+				  "ProRes 4444. FULL colour resolution - the only preset that keeps "
+				  "red text and UI intact. Use this if anything on screen is saturated." },
 				{ "lossless",   "mkv", "-c:v libx264 -qp 0 -preset veryslow",
 				  "Mathematically lossless. Archival; very large." },
 			};
@@ -221,7 +229,16 @@ namespace videoout
 		std::string args = cfg.renderVideoArgs;
 		std::string ext  = cfg.renderVideoExt;
 		if (loadPreset(cfg.renderVideoPreset.c_str(), args, ext))
+		{
 			logger::write("info", "video: preset '%s'", cfg.renderVideoPreset.c_str());
+
+			// Named right next to the preset that beat them. Two keys that both
+			// look like "the encoder settings", where one silently wins, is how
+			// a corrected -pix_fmt got edited into an ini and never ran.
+			if (!cfg.renderVideoArgs.empty())
+				logger::write("info",
+					"video: RenderVideoArgs and RenderVideoExt are NOT in use - the preset supplies both. Blank RenderVideoPreset to use them.");
+		}
 
 		snprintf(s_outPath, sizeof(s_outPath), "%s\\video.%s", folder, ext.c_str());
 

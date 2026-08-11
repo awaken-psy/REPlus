@@ -22,6 +22,9 @@ namespace game
 	extern uintptr_t addr_ShapeTestManager;      // WorldProbe shape-test manager (a fixed global)
 	extern uintptr_t addr_ShapeTestSubmit;       // SubmitTest(manager, desc, 0) -> bool
 	extern uintptr_t addr_ShapeTestVTable;       // the probe descriptor's vtable
+	extern uintptr_t addr_FixedTimeCtrlPtr;      // IReplayPlaybackController**
+	extern uintptr_t addr_FixedTimeEnabled;      // sm_fixedTimeExport (bool)
+	extern uintptr_t addr_FixedTimeTotalNs;      // sm_exportTotalNs (u64)
 	extern uintptr_t addr_ComputeSafePosition;   // camReplayFreeCamera::ComputeSafePosition(entity, cameraPos)
 	extern uintptr_t addr_ProfanityGetStatus;    // netProfanityFilter::GetStatusForRequest
 	extern uintptr_t addr_ReplayJumpTo;          // CReplayMgrInternal::JumpTo(float ms, u32 opts)
@@ -216,6 +219,33 @@ namespace game
 	void playbackPlay();
 	void playbackPause();
 	void playbackSetSpeed(float speed);   // <0 rewinds, 1.0 = normal
+
+	// --- fixed-time export ---------------------------------------------------
+	// The engine's own deterministic stepper: instead of asking playback to run
+	// at a speed and measuring the result, the replay advances by an exact frame
+	// duration per Process(). See the FIXEDTIME block in signatures.h.
+
+	// Everything resolved AND the controller is live, so a step can be driven.
+	bool fixedTimeAvailable();
+
+	// Take over the stepper. The replay then advances by exactly `stepMs` of
+	// clip per frame until fixedTimeEnd(). Returns false if unavailable, in
+	// which case nothing was touched. Idempotent.
+	bool fixedTimeBegin(float stepMs);
+
+	// Change the step mid-render - a sub-sample is a smaller step than a frame.
+	void fixedTimeSetStep(float stepMs);
+
+	// Hold the clip where it is for this present without giving the stepper up.
+	//
+	// The engine steps on EVERY Process(), while our capture only happens when
+	// the add-on is ready. Without a hold, one slow present advances the clip
+	// past a sub-sample that was never captured - a silently short exposure.
+	// A zero step yields a zero delta, so the clip waits instead.
+	void fixedTimeHold(bool hold);
+
+	// Hand the engine back exactly what it had. Safe to call unconditionally.
+	void fixedTimeEnd();
 	bool transportReady();
 
 	// --- Video Editor menu (all 0 if the menu feature failed to resolve) ---

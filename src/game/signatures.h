@@ -51,6 +51,7 @@ namespace gsig
 	inline constexpr unsigned char OP_MOVB_BL[] = { 0x88, 0x1D };      // mov byte [rip+d],bl
 	inline constexpr unsigned char OP_MOV_MEM_ECX[] = { 0x89, 0x0D };  // mov [rip+d],ecx
 	inline constexpr unsigned char OP_CMPB_IMM[]= { 0x80, 0x3D };      // cmp byte [rip+d],imm8
+	inline constexpr unsigned char OP_CMPB_R15B[]={ 0x44, 0x38, 0x3D };// cmp byte [rip+d],r15b
 	inline constexpr unsigned char OP_MOVZX_EAX[]={ 0x0F, 0xB6, 0x05 };// movzx eax,byte [rip+d]
 	inline constexpr unsigned char OP_MOV_RDI_MEM[]={ 0x48, 0x8B, 0x3D };// mov rdi,[rip+d]
 	inline constexpr unsigned char OP_MOV_R15_MEM[]={ 0x4C, 0x8B, 0x3D };// mov r15,[rip+d]
@@ -2540,6 +2541,88 @@ namespace gsig
 	//
 	// Resolved as base + disp32, so unlike Derive there is no instruction end to
 	// account for and `extra` would be meaningless.
+
+	// =========================================================================
+	//  Fixed-time export - the engine's own deterministic replay stepper
+	// =========================================================================
+	//
+	// Sliding paces motion blur by asking the replay to PLAY slowly and then
+	// measuring where the clock landed. The engine does not need to be asked:
+	// CReplayMgrInternal::Process has a fixed-step path that advances the replay
+	// by an EXACT frame duration, accumulated in integer nanoseconds. It is what
+	// Rockstar's own video export runs on.
+	//
+	// Source: game/control/replay/ReplayInternal.cpp:3456-3564. The gate is
+	//   sm_pPlaybackController && IsExportingToVideoFile() && sm_fixedTimeExport
+	//   && (IsStartingClipNextFrame() || !IsExportingPaused())
+	// Miss any of it and the frame delta is 0.0 - a frozen clock, which is what
+	// a half-configured attempt looks like from the outside.
+	//
+	// One pattern yields BOTH globals because the gate reads them three
+	// instructions apart, with a vtable call between:
+	//     mov  rcx,[rip+sm_pPlaybackController]
+	//     mov  rax,[rcx]
+	//     call [rax+0x28]                 ; IsStartingClipNextFrame
+	//     cmp  byte [rip+sm_fixedTimeExport],0
+	// Verified unique in the Enhanced image - the whole 20 bytes match once.
+	//
+	// Legacy is NOT done: these were read out of the Enhanced binary and MSVC
+	// orders this differently. Null there rather than guessed, so the feature
+	// reports unavailable instead of deriving a pointer from noise.
+	inline constexpr Sig FIXEDTIME_GATE = {
+		"48 8B 0D ? ? ? ? 48 8B 01 FF 50 28 80 3D ? ? ? ? 00",
+		// Legacy: MSVC hoists the flag into a register, so there is no single
+		// site holding both. The controller comes from the call that reads the
+		// step - mov rcx,[rip+ctrl] / call [rax+0x20] / mulss xmm0,[rip+1e6] -
+		// and the flag has its own anchor below. Both verified unique.
+		"48 8B 0D ? ? ? ? 48 8B 01 FF 50 20 33 C0 44 0F 28 C8 F3 0F 59 05"
+	};
+	// mov rcx,[rip+d] at +0x00 - the pointer to the controller.
+	inline constexpr DerivePair FIXEDTIME_CONTROLLER = {
+		{ 0x00, 0x03, OP_MOV_RCX_MEM, 3, 0 },   // enh
+		{ 0x00, 0x03, OP_MOV_RCX_MEM, 3, 0 },   // leg
+	};
+	// cmp byte [rip+d],imm8 at +0x0D. extra=1 for the trailing imm8 - without it
+	// the displacement is taken one byte short and lands on the wrong global.
+	inline constexpr DerivePair FIXEDTIME_ENABLED = {
+		{ 0x0D, 0x0F, OP_CMPB_IMM,  2, 1 },   // enh: inside the gate above
+		{ 0x00, 0x03, OP_CMPB_R15B, 3, 0 },   // leg: its own site, below
+	};
+
+	// Legacy only - Enhanced reaches the flag from FIXEDTIME_GATE.
+	//   cmp byte [rip+sm_fixedTimeExport],r15b / movss xmm13,[rip+k] /
+	//   mov r13,0x8000000000000000 / jz <skip the whole fixed-time block>
+	inline constexpr Sig FIXEDTIME_FLAG_LEG = {
+		nullptr,
+		"44 38 3D ? ? ? ? F3 44 0F 10 2D ? ? ? ? 49 BD 00 00 00 00 00 00 00 80 0F 84"
+	};
+
+	// sm_exportTotalNs - the absolute nanosecond accumulator the step derives
+	// from. It MUST be zeroed at the start of a render: the engine adds to it
+	// every step, so a second render in the same session would start with the
+	// first one's total, compute a clip position past the end, and clamp
+	// straight to timeRemaining - a render that ends on frame 0 looking for all
+	// the world like the clock stopped.
+	//
+	// Its own anchor rather than an offset off the flag: they are neighbours in
+	// one static block today, and a struct that shifts by four bytes in a game
+	// update would silently zero the wrong thing.
+	inline constexpr Sig FIXEDTIME_TOTALNS = {
+		"0F 57 C9 48 8B 0D ? ? ? ? 48 01 D9 31 C0 48 29 F9 48 0F 43 C1",
+		"48 8B 0D ? ? ? ? 0F 57 D2 49 03 CE 48 8B C1 48 2B C3 48 3B D9 48 1B C9"
+	};
+	inline constexpr DerivePair FIXEDTIME_TOTALNS_D = {
+		{ 0x03, 0x06, OP_MOV_RCX_MEM, 3, 0 },   // enh
+		{ 0x00, 0x03, OP_MOV_RCX_MEM, 3, 0 },   // leg
+	};
+
+	// IReplayPlaybackController vtable slots, confirmed against the interface
+	// header - every slot Process touches matches the declaration order.
+	inline constexpr int RPC_IS_EXPORTING_VIDEO = 0x00;  // bool, must be true
+	inline constexpr int RPC_IS_EXPORT_PAUSED   = 0x08;  // bool, must be false
+	inline constexpr int RPC_EXPORT_FRAME_MS    = 0x20;  // float, OUR step
+	inline constexpr int RPC_VTABLE_SLOTS       = 64;    // copied wholesale
+
 	struct DeriveAbs { int insn; int disp; const unsigned char* op; int opLen; };
 
 	inline constexpr unsigned char OP_MOVSXD_RDX[] = { 0x48, 0x63, 0x15 };  // movsxd rdx,[rip+d]

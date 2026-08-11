@@ -99,6 +99,7 @@ SmoothSpeedProfile=1       ; one speed curve across markers
 ArcLengthRemap=1           ; per-segment fallback, used only when both are 0
 Alpha=1                    ; tension: 0 uniform / 0.5 centripetal / 1 chordal
                            ; no effect while NaturalPacing=1
+SplineWeight=0             ; camera mass: 0 hits markers, 1 gets carried past them
 
 ; --- Shake ------------------------------------------------------------------
 ; Defaults each marker inherits; per-marker, set its Shake row to "Rockstar
@@ -209,7 +210,7 @@ RenderDofAutofocus=1       ; measure focus in the world each frame
 RenderDofFocusX=0.5        ; where to measure, across the frame
 RenderDofFocusY=0.5        ; and down it
 RenderJpeg=0               ; 0 = PNG
-RenderQuality=90           ; JPEG only
+RenderQuality=100          ; JPEG only. Below 91 = chroma subsampled
 ; Colours wrong but the screen fine? Auto misreads Legacy/FiveM. Try 1, then 2.
 RenderChannelOrder=0       ; 0 auto / 1 RGBA / 2 BGRA
 RenderHideHud=1            ; hide the editor HUD and cursor while rendering
@@ -223,9 +224,10 @@ RenderKeepFrames=0         ; Video mode: keep the frames too
 ; Empty = the bundled copy, then beside the exe, then PATH.
 FfmpegPath=
 
-; Named preset from presets\ - supplies args AND extension, overriding both
-; keys below. h264, h265, nvenc_hevc, prores_hq, lossless.
+; Named preset from presets\ (h264, h265, nvenc_hevc, prores_hq, prores_4444,
+; lossless). Blank it to use the two keys below instead.
 RenderVideoPreset=
+; IGNORED while a preset is named above - it supplies both of these.
 RenderVideoArgs=-c:v libx264 -crf 16 -preset slow -pix_fmt yuv420p
 RenderVideoExt=mp4
 

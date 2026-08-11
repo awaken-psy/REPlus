@@ -33,7 +33,7 @@ namespace fxcapture
 		// the fields are appended, so an older add-on simply never looks at them
 		// and the capture protocol is unchanged. It is here to be seen in a log
 		// when a pair does turn out to be mismatched.
-		constexpr uint32_t kVersion = 9;
+		constexpr uint32_t kVersion = 10;
 
 		// One place, always, next to the exe. Every render is a numbered
 		// subfolder inside it.
@@ -224,6 +224,21 @@ namespace fxcapture
 		// Only zero it if we are the one who created it. Simple Camera or the
 		// addon may already own this block and be mid-render.
 		if (!existed) memset(s_block, 0, sizeof(FxCaptureBlock));
+
+		// Name ourselves, so the add-on can bind to OUR exports.
+		//
+		// More than one mod exports the IGCS camera-tools interface - NVE does -
+		// and the add-on takes the first loaded module that has it. Load order
+		// then silently decides whose camera a depth-of-field session drives.
+		{
+			HMODULE self = nullptr;
+			GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+			                   GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+			                   (LPCSTR)&createTree, &self);
+			const uint64_t h = (uint64_t)self;
+			s_block->asiModuleLo = (uint32_t)(h & 0xFFFFFFFFull);
+			s_block->asiModuleHi = (uint32_t)(h >> 32);
+		}
 
 		s_block->magic   = kMagic;
 		s_block->version = kVersion;

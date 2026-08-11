@@ -547,6 +547,12 @@ namespace smoothblend
 
 		const float alpha = ms.has(rsettings::P_ALPHA) ? ms.v[rsettings::P_ALPHA] : cfg.alpha;
 
+		// Threaded into every evaluator below, including the arc-length ones.
+		// segmentLength and paramAtDistance measure by SAMPLING the curve, so if
+		// they were left on the unweighted path they would pace the camera along
+		// a curve it is not on - and the heavier the weight, the further out.
+		const float wgt = cfg.splineWeight;
+
 		const int nextIdx = game::nextMarkerIndex(currIdx);
 		void* next = rstorage::tryGetMarker(storage, nextIdx);
 		if (!next)
@@ -692,7 +698,7 @@ namespace smoothblend
 		const Vec3 c0 = pointAt(w, 0), c1 = pointAt(w, 1), c2 = pointAt(w, 2);
 		const Vec3 c3 = pointAt(w, 3), c4 = pointAt(w, 4), c5 = pointAt(w, 5);
 
-		const float lenCurr = spline::segmentLength(c1, c2, c3, c4, alpha);
+		const float lenCurr = spline::segmentLength(c1, c2, c3, c4, alpha, wgt);
 
 		// A zero-length path has nothing to interpolate. In WORLD space that is
 		// two markers in the same place and stock handles it fine.
@@ -711,7 +717,7 @@ namespace smoothblend
 		// spline is doing anything you could see: if it is near zero the curve
 		// and the lerp are the same path, and no amount of splining will look
 		// different from linear.
-		const Vec3 mid  = spline::catmullRom(c1, c2, c3, c4, 0.5f, alpha);
+		const Vec3 mid  = spline::catmullRom(c1, c2, c3, c4, 0.5f, alpha, wgt);
 		const Vec3 lerp = (c2 + c3) * 0.5f;
 		const float bow = (mid - lerp).length();
 
@@ -853,8 +859,8 @@ namespace smoothblend
 			// easedAt is the identity, so this is the previous expression exactly.
 			constexpr float kH = 8.0f;   // ms
 			const Vec3 ctrl[4] = { c1, c2, c3, c4 };
-			const Vec3 pA = spline::hermitePos(ctrl, tk, easedAt(now - kH));
-			const Vec3 pB = spline::hermitePos(ctrl, tk, easedAt(now + kH));
+			const Vec3 pA = spline::hermitePos(ctrl, tk, easedAt(now - kH), wgt);
+			const Vec3 pB = spline::hermitePos(ctrl, tk, easedAt(now + kH), wgt);
 			s_pathSpeed      = (pB - pA).length() / (2.0f * kH * 0.001f);
 			s_pathSpeedValid = true;
 		}
@@ -866,8 +872,8 @@ namespace smoothblend
 		// the two agree now.
 		else if (cfg.smoothSpeedProfile && !hasEase)
 		{
-			const float lenPrev = w.have[1] ? spline::segmentLength(c0, c1, c2, c3, alpha) : lenCurr;
-			const float lenNext = w.have[4] ? spline::segmentLength(c2, c3, c4, c5, alpha) : lenCurr;
+			const float lenPrev = w.have[1] ? spline::segmentLength(c0, c1, c2, c3, alpha, wgt) : lenCurr;
+			const float lenNext = w.have[4] ? spline::segmentLength(c2, c3, c4, c5, alpha, wgt) : lenCurr;
 
 			// Knot times. Mirror the interval when a neighbour is missing so the
 			// end tangents stay sane instead of collapsing to zero.
@@ -881,7 +887,7 @@ namespace smoothblend
 			if (!(dist > 0.0f)) dist = 0.0f;
 			if (dist > lenCurr)  dist = lenCurr;
 
-			u = spline::paramAtDistance(c1, c2, c3, c4, dist, alpha);
+			u = spline::paramAtDistance(c1, c2, c3, c4, dist, alpha, wgt);
 
 			// Camera speed at this instant, for shake coupling.
 			//
@@ -909,7 +915,7 @@ namespace smoothblend
 			const float frac = spline::ease(t, easeIn, easeOut);
 
 			u = cfg.arcLengthRemap
-				? spline::paramAtDistance(c1, c2, c3, c4, frac * lenCurr, alpha)
+				? spline::paramAtDistance(c1, c2, c3, c4, frac * lenCurr, alpha, wgt)
 				: frac;
 
 			// Same idea on the eased path: differentiate the ease curve rather
@@ -947,8 +953,8 @@ namespace smoothblend
 			// set this is what makes the dolly ease along with the framing instead
 			// of the two disagreeing. The non-natural branch already carries the
 			// ease inside u.
-			Vec3 pos = naturalPath ? spline::hermitePos(ctrl, tk, easedNow)
-			                       : spline::catmullRom(c1, c2, c3, c4, u, alpha);
+			Vec3 pos = naturalPath ? spline::hermitePos(ctrl, tk, easedNow, wgt)
+			                       : spline::catmullRom(c1, c2, c3, c4, u, alpha, wgt);
 
 			// DIAGNOSTIC: exaggerate how far the curve departs from the straight
 			// line, without moving either endpoint.
@@ -1065,6 +1071,15 @@ namespace smoothblend
 				};
 
 				float fov = spline::pchipAt(tk, fk, now);
+				// Camera weight on the zoom, same idea as position: a heavy lens does
+				// not hit the authored FOV, it is carried toward it. Scalar, so this is
+				// the exact B-spline rather than the approximation rotation needs.
+				if (Config::get().splineWeight > 0.0f)
+				{
+					float bw[4]; spline::bsplineW(tk, now, bw);
+					const float bs = fk[0]*bw[0]+fk[1]*bw[1]+fk[2]*bw[2]+fk[3]*bw[3];
+					if (isfinite(bs)) fov += (bs - fov) * Config::get().splineWeight;
+				}
 				if (isfinite(fov))
 				{
 					// The game's own bounds, the same two constants SetFov and
@@ -1200,7 +1215,39 @@ namespace smoothblend
 				? rquat::align(attachWorldQuat(w.m[4], parent), q2) : q2;
 
 			const rquat::Quat qk[4] = { q0, q1, q2, q3 };
-			const rquat::Quat q = rquat::hermite(qk, tk, rotAt);
+			rquat::Quat q = rquat::hermite(qk, tk, rotAt);
+
+			// Camera weight on the AIM. This is where most of the felt mass is - a
+			// heavy head has to be swung, it does not snap to a new look direction.
+			//
+			// Approximate on purpose: a true quaternion B-spline is the cumulative
+			// exp/log form, not a weighted sum. A normalised weighted average is
+			// indistinguishable at camera scale, where adjacent markers are well
+			// under 90 degrees apart, and q0..q3 are already hemisphere-aligned
+			// above - without that the sum would partially cancel.
+			if (Config::get().splineWeight > 0.0f)
+			{
+				float bw[4]; spline::bsplineW(tk, rotAt, bw);
+				rquat::Quat bs;
+				bs.x = qk[0].x*bw[0]+qk[1].x*bw[1]+qk[2].x*bw[2]+qk[3].x*bw[3];
+				bs.y = qk[0].y*bw[0]+qk[1].y*bw[1]+qk[2].y*bw[2]+qk[3].y*bw[3];
+				bs.z = qk[0].z*bw[0]+qk[1].z*bw[1]+qk[2].z*bw[2]+qk[3].z*bw[3];
+				bs.w = qk[0].w*bw[0]+qk[1].w*bw[1]+qk[2].w*bw[2]+qk[3].w*bw[3];
+				float n = sqrtf(bs.x*bs.x+bs.y*bs.y+bs.z*bs.z+bs.w*bs.w);
+				if (n > 1e-5f)
+				{
+					const float inv = 1.0f/n;
+					bs.x*=inv; bs.y*=inv; bs.z*=inv; bs.w*=inv;
+					// Take the short way round before blending.
+					if (q.x*bs.x+q.y*bs.y+q.z*bs.z+q.w*bs.w < 0.0f)
+						{ bs.x=-bs.x; bs.y=-bs.y; bs.z=-bs.z; bs.w=-bs.w; }
+					const float wq = Config::get().splineWeight;
+					q.x += (bs.x-q.x)*wq; q.y += (bs.y-q.y)*wq;
+					q.z += (bs.z-q.z)*wq; q.w += (bs.w-q.w)*wq;
+					n = sqrtf(q.x*q.x+q.y*q.y+q.z*q.z+q.w*q.w);
+					if (n > 1e-5f) { const float i2=1.0f/n; q.x*=i2; q.y*=i2; q.z*=i2; q.w*=i2; }
+				}
+			}
 			s_trace.orient = 'e';
 
 			if (isfinite(q.x) && isfinite(q.y) && isfinite(q.z) && isfinite(q.w))

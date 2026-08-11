@@ -21,6 +21,9 @@ namespace game
 	uintptr_t addr_ShapeTestManager    = 0;
 	uintptr_t addr_ShapeTestSubmit     = 0;
 	uintptr_t addr_ShapeTestVTable     = 0;
+	uintptr_t addr_FixedTimeCtrlPtr    = 0;   // IReplayPlaybackController**
+	uintptr_t addr_FixedTimeEnabled    = 0;   // sm_fixedTimeExport (bool)
+	uintptr_t addr_FixedTimeTotalNs    = 0;   // sm_exportTotalNs (u64)
 	uintptr_t addr_ComputeSafePosition = 0;
 	uintptr_t addr_ProfanityGetStatus  = 0;
 	uintptr_t addr_JumpToNonDilated    = 0;
@@ -823,6 +826,9 @@ namespace game
 				addr_ShapeTestManager = derive(uc, pickD(gsig::SHAPETEST_MANAGER), "ShapeTestManager");
 				addr_ShapeTestSubmit  = derive(uc, pickD(gsig::SHAPETEST_SUBMIT),  "ShapeTestSubmit");
 
+			// (fixed-time export is resolved further down - it hangs off its own
+			//  pattern, not off the collision sweep.)
+
 				if (isEnhanced())
 				{
 					addr_ShapeTestVTable = derive(uc, gsig::SHAPETEST_VTABLE_ENH, "ShapeTestVTable");
@@ -1070,6 +1076,41 @@ namespace game
 				(uint64_t)(addr_DrawSpinner ? addr_DrawSpinner - memory::base() : 0));
 		}
 
+		// --- fixed-time export -----------------------------------------------
+		//
+		// One pattern, two globals: the gate reads the controller pointer and the
+		// enable flag three instructions apart. Enhanced only for now - Legacy's
+		// Sig is null, so pick() returns nothing and this stays silent there.
+		if (const char* p = pick(gsig::FIXEDTIME_GATE); p && *p)
+		{
+			const uintptr_t g = memory::scan(p).address;
+			if (g)
+			{
+				addr_FixedTimeCtrlPtr = derive(g, pickD(gsig::FIXEDTIME_CONTROLLER), "FixedTimeCtrl");
+				if (isEnhanced())
+					addr_FixedTimeEnabled = derive(g, pickD(gsig::FIXEDTIME_ENABLED), "FixedTimeFlag");
+			}
+		}
+		// Legacy keeps the flag at its own site - MSVC hoisted it out of the gate.
+		if (const char* p = pick(gsig::FIXEDTIME_FLAG_LEG); p && *p)
+		{
+			const uintptr_t g = memory::scan(p).address;
+			if (g) addr_FixedTimeEnabled = derive(g, pickD(gsig::FIXEDTIME_ENABLED), "FixedTimeFlag");
+		}
+		if (const char* p = pick(gsig::FIXEDTIME_TOTALNS); p && *p)
+		{
+			const uintptr_t g = memory::scan(p).address;
+			if (g)
+			{
+				addr_FixedTimeTotalNs = derive(g, pickD(gsig::FIXEDTIME_TOTALNS_D), "FixedTimeTotalNs");
+				logger::write("info",
+					"  ReplayFixedStep      = ctrl %p / flag %p (rva 0x%llX / 0x%llX)",
+					(void*)addr_FixedTimeCtrlPtr, (void*)addr_FixedTimeEnabled,
+					(uint64_t)(addr_FixedTimeCtrlPtr ? addr_FixedTimeCtrlPtr - memory::base() : 0),
+					(uint64_t)(addr_FixedTimeEnabled ? addr_FixedTimeEnabled - memory::base() : 0));
+			}
+		}
+
 		if (const char* p = pick(gsig::SCALEFORM_DRAWMOVIE); p && *p)
 		{
 			addr_ScaleformDrawMovie = memory::scan(p).address;
@@ -1261,6 +1302,101 @@ namespace game
 		if (!addr_SetCursorSpeed) return;
 		using Fn = void(__fastcall*)(float);
 		((Fn)addr_SetCursorSpeed)(speed);
+	}
+
+	// --- fixed-time export ---------------------------------------------------
+	//
+	// The engine will step the replay by an exact frame duration, but only
+	// through a gate meant for the stock video export:
+	//   sm_pPlaybackController && IsExportingToVideoFile() && sm_fixedTimeExport
+	//   && (IsStartingClipNextFrame() || !IsExportingPaused())
+	// RE+ diverts that export, so slots 0 and 1 answer the wrong way and the
+	// step never runs. We answer them ourselves and supply the duration.
+	//
+	// A COPY of the vtable, not a patch of the live one. The controller is a
+	// shared engine object; editing its vtable in place would change behaviour
+	// for the stock export and anything else holding the interface, and there
+	// would be no clean way back. Swapping the object's vtable POINTER touches
+	// exactly one qword, leaves every other slot forwarding to the originals,
+	// and restores by putting the old pointer back.
+	namespace
+	{
+		float     s_fxStepMs   = 0.0f;   // what slot 4 hands back
+		bool      s_fxHold     = false;  // ...unless we are not ready to capture
+		void**    s_fxOldVt    = nullptr;// the controller's real vtable
+		void*     s_fxObj      = nullptr;// the object we swapped
+		char      s_fxOldFlag  = 0;      // sm_fixedTimeExport before we set it
+		void*     s_fxVt[gsig::RPC_VTABLE_SLOTS] = {};
+
+		// x64 has one calling convention: `this` in RCX, bool in AL, float in
+		// XMM0. Nothing here reads the object, so the parameter is unnamed.
+		bool  __fastcall fxIsExportingVideo(void*) { return true;  }
+		bool  __fastcall fxIsExportPaused  (void*) { return false; }
+		float __fastcall fxExportFrameMs   (void*) { return s_fxHold ? 0.0f : s_fxStepMs; }
+	}
+
+	bool fixedTimeAvailable()
+	{
+		if (!addr_FixedTimeCtrlPtr || !addr_FixedTimeEnabled) return false;
+		// The pointer being live is the part that cannot be assumed: it is set
+		// when a playback controller registers, and a null one makes Process skip
+		// the whole block rather than fail loudly.
+		return *(void**)addr_FixedTimeCtrlPtr != nullptr;
+	}
+
+	bool fixedTimeBegin(float stepMs)
+	{
+		if (!fixedTimeAvailable()) return false;
+		s_fxStepMs = stepMs;
+		if (s_fxObj) return true;   // already ours
+
+		__try
+		{
+			void*  obj = *(void**)addr_FixedTimeCtrlPtr;
+			void** vt  = *(void***)obj;
+			if (!vt) return false;
+
+			memcpy(s_fxVt, vt, sizeof(s_fxVt));
+			s_fxVt[gsig::RPC_IS_EXPORTING_VIDEO / 8] = (void*)&fxIsExportingVideo;
+			s_fxVt[gsig::RPC_IS_EXPORT_PAUSED   / 8] = (void*)&fxIsExportPaused;
+			s_fxVt[gsig::RPC_EXPORT_FRAME_MS    / 8] = (void*)&fxExportFrameMs;
+
+			s_fxOldVt  = vt;
+			*(void***)obj = s_fxVt;
+			s_fxObj    = obj;
+
+			s_fxOldFlag = *(char*)addr_FixedTimeEnabled;
+			*(char*)addr_FixedTimeEnabled = 1;
+
+			// Start the accumulator from zero. It is absolute, and the engine only
+			// ever adds to it - carrying a previous render's total in would put the
+			// sampled clip position past the clip and clamp every frame to the end.
+			if (addr_FixedTimeTotalNs) *(unsigned long long*)addr_FixedTimeTotalNs = 0ull;
+			return true;
+		}
+		__except (EXCEPTION_EXECUTE_HANDLER)
+		{
+			// Stand down completely rather than leave a half-swapped object.
+			s_fxObj = nullptr; s_fxOldVt = nullptr;
+			return false;
+		}
+	}
+
+	void fixedTimeSetStep(float stepMs) { s_fxStepMs = stepMs; }
+	void fixedTimeHold(bool hold)       { s_fxHold  = hold;   }
+
+	void fixedTimeEnd()
+	{
+		if (!s_fxObj) return;
+		__try
+		{
+			*(void***)s_fxObj = s_fxOldVt;
+			if (addr_FixedTimeEnabled) *(char*)addr_FixedTimeEnabled = s_fxOldFlag;
+		}
+		__except (EXCEPTION_EXECUTE_HANDLER) {}
+		s_fxObj = nullptr;
+		s_fxOldVt = nullptr;
+		s_fxHold  = false;
 	}
 
 	void* markerStorage()

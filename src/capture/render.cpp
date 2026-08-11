@@ -8,6 +8,7 @@
 #include "main.h"
 #include "capture/render.h"
 #include "capture/fxcapture.h"
+#include "game/worldprobe.h"
 #include "capture/exporthook.h"
 #include "capture/videoout.h"
 #include "capture/audioout.h"
@@ -105,6 +106,9 @@ namespace render
 		double s_slideTime   = 0.0;
 		int    s_slideSample = 0;    // samples accumulated into the current frame
 		bool   s_slideFlush  = false;// a flush was posted; collect it next present
+		bool   s_fxStep      = false;// the engine is stepping this render, not us
+		float  s_fxSampleMs  = 0.0f; // clip ms one sub-sample advances
+		float  s_fxGapMs     = 0.0f; // ...and the closed-shutter remainder
 
 		// Live playback speed, steered to hit RenderSamples.
 		//
@@ -125,6 +129,11 @@ namespace render
 		double s_slideStep   = 0.0;  // clip ms one present covers, smoothed
 		bool  s_slideCalib   = false;// AUTO has taken its measurement
 		int   s_slideWarm    = 0;    // presents spent measuring before frame 0
+		uint32_t s_slideWarmT0 = 0;  // real time the kept half of that started
+		int   s_slideWarmN0  = 0;    // present count when that window opened
+		double s_slidePerPresent = 0.0; // REAL ms per present, measured
+		bool  s_slideStepOk  = true; // did the clip play at the speed we asked?
+		bool  s_slideToldRemeasure = false;
 		bool  s_slideToldReach = false; // reported an unreachable shutter, once
 
 		// REAL milliseconds between presents, smoothed. Not clip time.
@@ -178,6 +187,23 @@ namespace render
 		// Bias it down and let the controller climb: the climb costs a few soft
 		// frames, the alternative costs a smeared one.
 		constexpr float kSlideCalibBias = 0.35f;
+
+		// FLOOR: the least clip time one present may cover.
+		//
+		// The replay clock does not resolve arbitrarily small steps. Two runs on
+		// the same clip, differing only in sample count:
+		//     16 samples -> 0.0235x -> 0.73ms of clip per present -> fine
+		//     64 samples -> 0.0125x -> 0.40ms per present -> clock never moves
+		// So the threshold is between the two, and 0.40 was first set AT the
+		// failing value from a mis-derived figure. 0.90 sits clear of the last
+		// known-bad and under the last known-good with margin.
+		//
+		// So this is a hard limit of the engine, not of the pacing, and no
+		// calibration can work around it: below the floor the clock simply has
+		// no smaller step to take. What CAN be chosen is which way to fail -
+		// a shutter slightly longer than asked for, or a render that hangs.
+		// A longer shutter is more blur; a hang is no video at all.
+		constexpr double kMinClipStepMs = 0.90;
 
 		// --- position steering -------------------------------------------------
 		// How much of the measured drift is taken out per cycle. The controller
@@ -568,6 +594,21 @@ namespace render
 		// frame pass then takes its length from.
 		constexpr int kAudioStallMs = 1500;
 
+		// Clamp a slide speed to something the replay clock can step. Shared by
+		// the calibration and the per-frame controller so they cannot disagree.
+		void slideFloor(float& sp)
+		{
+			float lo = 0.001f;
+			if (s_slidePerPresent > 0.0)
+			{
+				const float f = (float)(kMinClipStepMs / s_slidePerPresent);
+				if (f > lo) lo = f;
+			}
+			if (sp < lo)   sp = lo;
+			if (sp > 1.0f) sp = 1.0f;
+		}
+
+
 		// Time of the current sub-sample. Samples are spread across the OPEN
 		// part of the frame interval only, which is what shutter angle means:
 		// shutter 0.5 exposes the first half of the interval, so the blur trail
@@ -776,6 +817,12 @@ namespace render
 
 		void finish(const char* why, bool complete)
 		{
+			// Same argument as the pass below, one layer down: the engine is
+			// holding a vtable pointer of OURS while a render steps the replay.
+			// Leaving it swapped past the render outlives what it points into.
+			game::fixedTimeEnd();
+			s_fxStep = false;
+
 			// Unconditional, and first. A pass left running would keep sweeping an
 			// aperture for a render that no longer exists, and it holds the editor
 			// camera while it does. Covers the abort, the end of the sequence and
@@ -1119,7 +1166,30 @@ namespace render
 		s_cfg.shutter      = c.renderShutter;
 		s_cfg.settleFrames = c.renderSettleFrames;
 		s_cfg.settleSubFrames = c.renderSettleSubFrames;
-		s_cfg.jpeg         = c.renderJpeg;
+		// JPEG is an image-SEQUENCE format, so it only means anything when the
+		// sequence is what you keep. In Video mode every frame is encoded,
+		// piped, decoded by ffmpeg and deleted - so a lossy intermediate costs
+		// quality in the master to save space on files nobody ever opens.
+		//
+		// Worse than it sounds: stb subsamples chroma at quality <= 90, so this
+		// quartered the colour resolution of the encode before the codec ever
+		// saw a pixel, and no downstream setting could get it back.
+		//
+		// Unconditional rather than a second toggle - there is no shot where a
+		// lossy transient is the right answer, so it is not a choice to offer.
+		s_cfg.jpeg         = c.renderJpeg && c.renderMode != Config::RenderMode::Video;
+		if (c.renderJpeg && !s_cfg.jpeg)
+		{
+			// Said once, not silently. A setting that is on in the ini and off in
+			// effect is exactly the kind of thing nothing else surfaces.
+			static bool told = false;
+			if (!told)
+			{
+				told = true;
+				logger::write("info",
+					"render: RenderJpeg is ignored in Video mode - the frames are transient, so they stay PNG. Set RenderMode=Frames if you want a JPEG sequence.");
+			}
+		}
 		s_cfg.quality      = c.renderQuality;
 		s_cfg.highlight    = c.renderHighlight;
 		s_cfg.channelOrder = c.renderChannelOrder;
@@ -1140,9 +1210,15 @@ namespace render
 		// looked healthy - sessions cycling once a minute, frames being written -
 		// while sitting on frame 0 for an hour, rewriting frame_000000 with 64
 		// consecutive aperture sweeps of the same instant.
+		static int s_saidSamples = -1;
 		if (s_cfg.captureMode == 2 && s_cfg.samples != 1)
 		{
-			logger::write("info",
+			// Once per distinct value. applyConfig runs on every menu row change,
+			// and this filled the log with thirty identical lines while someone
+			// dialled the lens in.
+			const bool say = (s_saidSamples != s_cfg.samples);
+			s_saidSamples = s_cfg.samples;
+			if (say) logger::write("info",
 				"render: depth-of-field mode samples the aperture, so RenderSamples=%d "
 				"is ignored and treated as 1. Sample count comes from the add-on's bokeh "
 				"quality; RenderShutter still sets the exposure.", s_cfg.samples);
@@ -1310,6 +1386,7 @@ namespace render
 			s_slideTime   = 0.0;
 			s_slideSample = 0;
 			s_slideFlush  = false;
+			s_fxStep      = false;
 			s_clockStillTick = 0;   // doubles as the sliding clock-stall counter
 
 			// Take the editor's HUD down for the duration. Same flag the
@@ -1344,6 +1421,11 @@ namespace render
 				s_slideSpeed  = kSlideSeed;
 				s_slideCalib  = false;
 				s_slideWarm   = 0;
+				s_slideWarmT0 = 0;
+				s_slideWarmN0 = 0;
+				s_slidePerPresent = 0.0;
+				s_slideStepOk = true;
+				s_slideToldRemeasure = false;
 				s_slideStep   = 0.0;
 				s_slideCapture = false;
 				s_slideLogged = 0;
@@ -1352,12 +1434,71 @@ namespace render
 				// over from the previous one would be measured on a different scene.
 				s_slideRealStep  = 0.0;
 				s_slideLastQpc   = 0;
-				game::playbackSetSpeed(s_slideSpeed);
+				// PLAY FIRST, THEN THE RATE - the order is the whole thing.
+				//
+				// playbackPlay() is SetNextPlayBackState(PLAY_FWD), and the engine
+				// restores ITS OWN saved speed on a state change - the note on the
+				// clip transition below already says so. Setting our rate and then
+				// asking it to play threw the rate away on the same tick, so the clip
+				// ran at 1.0x for the whole render: every calibration measured 1.0x,
+				// and on a 6.2s clip playback reached the END during warm-up, which
+				// is what 'STOPPED SHORT at 1 of 188 frames' actually was.
+				//
+				// SetCursorSpeed issues the play state itself, so this order is not
+				// just safe but redundant in the right direction: state first, then
+				// the rate that must survive it.
 				game::playbackPlay();
+				game::playbackSetSpeed(s_slideSpeed);
 				s_lastClock = -1.0f;
 				s_step      = Step::Slide;
-				logger::write("info",
-					"render: SLIDING - %d sample(s) per frame at a %.0f-degree shutter, "
+				// Can the engine step this deterministically instead?
+				//
+				// Reported, not used yet. The gate needs a LIVE playback controller,
+				// and nothing guarantees one is registered once RE+ has diverted the
+				// stock bake - that single fact decides whether the fixed-step rewrite
+				// is possible at all, and a render can answer it for free.
+				// EXACT STEPPING, if the engine will give it to us.
+				//
+				// Everything below this - the warm-up, the calibration, the speed
+				// controller, the clock-resolution floor - exists to guess a clock we
+				// cannot command. Here we can. The replay advances by exactly the step
+				// we hand it, derived from an ABSOLUTE nanosecond accumulator, so a
+				// sub-sample too small for the float clock is carried into the next
+				// frame's delta rather than lost. That is precisely why this path needs
+				// no floor - with a speed, a step that rounds away is gone forever.
+				//
+				// The engine also does three things here we hand-rolled worse:
+				// ConvertTimeToNonDilatedTimeMs applies marker speed per clip, the
+				// clip-boundary clamp carries the remainder into the next clip, and
+				// AddVideoTimeNs keeps audio on the same nanosecond count.
+				{
+					const int   n  = s_cfg.samples < 1 ? 1 : s_cfg.samples;
+					const float ex = s_dt * s_cfg.shutter;      // exposed part of a frame
+					s_fxSampleMs   = ex / (float)n;
+					s_fxGapMs      = s_dt - ex;                 // 0 at a 360-degree shutter
+					s_fxStep       = game::fixedTimeBegin(s_fxSampleMs);
+
+					if (s_fxStep)
+					{
+						s_slideCalib = true;   // nothing to calibrate - the step is stated
+						logger::write("info",
+							"render: SLIDING (exact) - the engine steps the replay %.4fms per "
+							"sub-sample, %d of them, then %.4fms with the shutter closed. No "
+							"speed request, no calibration, no clock floor.",
+							s_fxSampleMs, n, s_fxGapMs);
+					}
+					else
+					{
+						logger::write("info",
+							"render: exact stepping unavailable (no live playback controller, "
+							"or not resolved on this build) - pacing by playback speed instead.");
+					}
+				}
+
+				// Only when WE are pacing - the exact path prints its own line, and
+				// this one's "starting at 0.005x / self-tunes" is a lie there.
+				if (!s_fxStep) logger::write("info",
+				"render: SLIDING - %d sample(s) per frame at a %.0f-degree shutter, "
 					"starting at %.3gx. The clip plays, so particles and any temporal "
 					"accumulation stay live; the speed self-tunes so the samples span "
 					"the shutter.",
@@ -1509,6 +1650,14 @@ namespace render
 				s_cfg.dofBokehSize, s_cfg.dofQuality,
 				s_cfg.dofAutofocus ? "on" : "off",
 				s_cfg.dofFocusX, s_cfg.dofFocusY, s_cfg.highlight);
+
+			if (s_cfg.dofAutofocus && !worldprobe::available())
+				logger::write("info",
+					"render: !! autofocus is ON but the world query is unavailable on this "
+					"build - UpdateCollision did not resolve, and the probe's addresses are "
+					"derived from it. Focus will stay wherever the add-on's panel last put "
+					"it. Another mod hooking that function is the usual cause; check the "
+					"'Pattern ... not found' line near the top of this log.");
 
 			logger::write("info",
 				"render: DEPTH OF FIELD - each frame is accumulated across a real "
@@ -2009,8 +2158,9 @@ namespace render
 			// slow motion has to be re-asserted rather than assumed.
 			if (s_step == Step::Slide)
 			{
-				game::playbackSetSpeed(s_slideSpeed);
+				// Same order as the slide start - see the note there.
 				game::playbackPlay();
+				game::playbackSetSpeed(s_slideSpeed);
 				s_lastClock  = -1.0f;   // the new clip's clock has its own base
 				s_clockStillTick = 0;
 				return;
@@ -2273,7 +2423,14 @@ namespace render
 		{
 			if (s_slideFlush)
 			{
-				if (!fxcapture::lastDone()) return;
+				// Same hold: the frame is not written yet, so the clip must not
+				// move on to the next exposure without it.
+				if (!fxcapture::lastDone())
+				{
+					if (s_fxStep) game::fixedTimeHold(true);
+					return;
+				}
+				if (s_fxStep) game::fixedTimeHold(false);
 
 				if (videoout::active())
 				{
@@ -2285,6 +2442,22 @@ namespace render
 				s_slideCapture = false;
 				s_slideSample  = 0;
 
+				// Shutter closed: one present covers the whole gap to the next
+				// frame, so the exposure lands exactly on the output grid. At a
+				// 360-degree shutter the gap is zero and this is a no-op.
+				if (s_fxStep && s_fxGapMs > 0.0f) game::fixedTimeSetStep(s_fxGapMs);
+
+				// The speed CONTROLLER below is what the stepper replaces - not the
+				// frame bookkeeping that follows it.
+				//
+				// This was a bare `return`, which also skipped ++s_frame at the end of
+				// the block. Video mode hid it: pushFrame() runs above this, so ffmpeg
+				// still received every frame and the output looked correct - while
+				// s_frame sat at 0, buildPath() named every file frame_000000.png, and
+				// an image-sequence render overwrote one file for its whole length.
+				// Guard the steering only.
+				if (!s_fxStep)
+				{
 				// Steer on POSITION, not on rate.
 				//
 				// The obvious controller here asks "did N samples span the shutter"
@@ -2401,7 +2574,10 @@ namespace render
 						s_slideSpeed = (float)((double)s_slideSpeed * k);
 					}
 
-					if (s_slideSpeed < 0.001f) s_slideSpeed = 0.001f;
+					// Same floor the calibration uses. Without it the controller can
+					// walk the speed back under the clock's resolution between frames
+					// and stall a render that had already started cleanly.
+					slideFloor(s_slideSpeed);
 					if (s_slideSpeed > 1.0f)   s_slideSpeed = 1.0f;
 					game::playbackSetSpeed(s_slideSpeed);
 
@@ -2457,7 +2633,10 @@ namespace render
 						s_slideSpeed = (float)((double)s_slideSpeed * k);
 					}
 
-					if (s_slideSpeed < 0.001f) s_slideSpeed = 0.001f;
+					// Same floor the calibration uses. Without it the controller can
+					// walk the speed back under the clock's resolution between frames
+					// and stall a render that had already started cleanly.
+					slideFloor(s_slideSpeed);
 					if (s_slideSpeed > 1.0f)   s_slideSpeed = 1.0f;
 					game::playbackSetSpeed(s_slideSpeed);
 
@@ -2471,6 +2650,8 @@ namespace render
 							s_slideStep, (double)s_dt, s_slideSpeed);
 					}
 				}
+
+				}   // end of the speed controller
 
 				if (++s_frame >= s_frames) { finish("finished", true); return; }
 
@@ -2599,11 +2780,27 @@ namespace render
 				// fast machine, which is well inside an ordinary hitch.
 				if (delta <= 0.0f)
 				{
+					// ...but it CANNOT have ended before frame 0. Nothing has been
+					// exposed yet, so "the project ended" is not an available
+					// explanation for a still clock here - a slow seed speed is.
+					// The calibration below can seed 0.001x, and at that speed the
+					// engine's own clock quantisation swallows the step entirely:
+					// every present reads delta 0, the 1.5s timer expires, and a
+					// render that was about to correct itself reports "finished"
+					// at 0 of 1891 frames instead.
+					//
+					// So before the first frame this is a stall, not an ending, and
+					// it gets the long bound the audio pass uses for the same
+					// reason. The controller has thousands of presents to converge
+					// inside that.
+					const uint32_t lim = (s_frame == 0) ? (uint32_t)kAudioStallMs * 8
+					                                    : (uint32_t)kAudioStallMs;
 					const uint32_t tick = GetTickCount();
 					if (s_clockStillTick == 0) s_clockStillTick = tick;
-					if (tick - s_clockStillTick >= (uint32_t)kAudioStallMs)
+					if (tick - s_clockStillTick >= lim)
 					{
-						finish("finished - the clock stopped", true);
+						finish(s_frame == 0 ? "the clip clock never advanced"
+						                    : "finished - the clock stopped", true);
 						return;
 					}
 				}
@@ -2635,9 +2832,61 @@ namespace render
 				//
 				// Resetting the average here means only deltas measured at the
 				// speed we actually set reach it.
-				if (s_slideWarm == kSlideWarm / 2) s_slideStep = 0.0;
+				if (s_slideWarm == kSlideWarm / 2)
+				{
+					s_slideStep   = 0.0;
+					s_slideWarmT0 = GetTickCount();
+					s_slideWarmN0 = s_slideWarm;
+				}
 
 				if (s_slideWarm < kSlideWarm || s_slideStep <= 0.0) return;
+
+				// DOES THE MEASUREMENT DESCRIBE THE SPEED WE SET?
+				//
+				// Dropping the first half assumes the speed has landed by then. It
+				// has not when the warm-up is slow enough - one report spent 2.5s
+				// on these 12 presents while streaming, and the kept half still
+				// read normal-speed playback: 39.8ms of clip per present at a
+				// nominal 0.005x, i.e. one present every 8 seconds. Committing that
+				// seeds the floor, 0.001x, which is slow enough that the clock
+				// stops moving at all.
+				//
+				// The measurement is checkable rather than trusted. Clip-ms per
+				// present over real-ms per present IS the speed being played, so
+				// if that disagrees with the speed we asked for, the request has
+				// not taken effect and there is nothing to calibrate from yet.
+				// Wide threshold because a fast-motion marker legitimately inflates
+				// the ratio - the failure this catches is off by 19x.
+				const uint32_t warmNow = GetTickCount();
+				// From where THIS window started counting, not from the original
+				// half-way mark - a re-measure resets the clock, and pairing a
+				// fresh clock with a stale present count reads far too fast.
+				const int      warmN   = s_slideWarm - s_slideWarmN0;
+				if (warmN > 0 && warmNow > s_slideWarmT0)
+				{
+					s_slidePerPresent = (double)(warmNow - s_slideWarmT0) / (double)warmN;
+					const double playing = s_slideStep / s_slidePerPresent;
+					s_slideStepOk = !(playing > (double)s_slideSpeed * 4.0);
+					if (!s_slideStepOk && s_slideWarm < kSlideWarm * 8)
+					{
+						// Measure again. s_slideWarm keeps climbing, so this is
+						// bounded by the cap above and then commits regardless -
+						// a poor calibration is recoverable, a hang is not.
+						if (!s_slideToldRemeasure)
+						{
+							s_slideToldRemeasure = true;
+							logger::write("info",
+								"render: sliding - the clip is still playing at %.4gx "
+								"after asking for %.4gx, so there is nothing to "
+								"calibrate from yet. Measuring again.",
+								playing, (double)s_slideSpeed);
+						}
+						s_slideStep   = 0.0;
+						s_slideWarmT0 = warmNow;
+						s_slideWarmN0 = s_slideWarm;
+						return;
+					}
+				}
 
 				s_slideCalib = true;
 
@@ -2707,15 +2956,61 @@ namespace render
 				const double want = (n > 1) ? (double)s_dt * (double)s_cfg.shutter
 				                            : (double)s_dt * kSlideStep1;
 				const double have = s_slideStep * (double)n;
-				if (have > 0.0)
+
+				// TWO WAYS TO GET THERE, and the ratio is only the better one.
+				//
+				// The ratio (speed x want / step) folds in whatever speed the clip is
+				// ACTUALLY playing at, which is why it is preferred - but it is only
+				// meaningful if `step` was measured at the speed we asked for. When the
+				// request never lands, every measurement reads 1.0x and the ratio comes
+				// out ~200x too slow: a report seeded 0.001x, i.e. 33 SECONDS of real
+				// time per output frame. The controller cannot rescue that - it only
+				// corrects BETWEEN frames, so the escape hatch sits behind the very
+				// 33-second wall it exists to escape.
+				//
+				// So when the measurement is rejected, derive the seed from what holds
+				// whether or not the speed took: we want want/n of clip per present,
+				// and a present really takes s_slidePerPresent ms. That ratio IS the
+				// speed, with no dependence on the current one.
+				//
+				// Approximate on purpose - want is DILATED ms and perPresent is REAL,
+				// so a speed marker skews it. It only runs when the alternative is
+				// already wrong by orders of magnitude, and inside 2x is all the
+				// controller needs to converge from.
+				const bool useRatio = s_slideStepOk && have > 0.0;
+				if (useRatio || s_slidePerPresent > 0.0)
 				{
-					float ns = (float)((double)s_slideSpeed * want / have) * kSlideCalibBias;
+					float ns = useRatio
+						? (float)((double)s_slideSpeed * want / have) * kSlideCalibBias
+						: (float)((want / (double)n) / s_slidePerPresent) * kSlideCalibBias;
+					// Raise it to what the clock can actually step, and say so - the
+					// exposure is then longer than the shutter asked for, which is a
+					// thing the user can act on (fewer samples, or a wider shutter).
+					if (s_slidePerPresent > 0.0)
+					{
+						const float floorSpeed =
+							(float)(kMinClipStepMs / s_slidePerPresent);
+						if (ns < floorSpeed)
+						{
+							logger::write("info",
+								"render: %d sample(s) over a %.1fms shutter would step the clip "
+								"%.3fms per present, under the %.2fms the replay clock resolves - "
+								"so the speed is held at %.4gx and the exposure will be about %.0f%% "
+								"longer than asked. Lower RenderSamples or raise RenderShutter to "
+								"avoid it.",
+								n, want, (double)ns * s_slidePerPresent, kMinClipStepMs, floorSpeed,
+								((double)floorSpeed / (double)ns - 1.0) * 100.0);
+							ns = floorSpeed;
+						}
+					}
 					if (ns < 0.001f) ns = 0.001f;
 					if (ns > 1.0f)   ns = 1.0f;
 					logger::write("info",
-						"render: sliding AUTO - one present covers %.3fms of clip at "
-						"%.4gx, so %d sample(s) start at %.4gx for a %.1fms shutter",
-						s_slideStep, s_slideSpeed, n, ns, want);
+						"render: sliding AUTO - %s. One present covers %.3fms of clip at "
+						"%.4gx (%.1fms real), so %d sample(s) start at %.4gx for a %.1fms shutter",
+						useRatio ? "measured"
+							: "the speed request never landed, so this is paced off the present rate",
+						s_slideStep, s_slideSpeed, s_slidePerPresent, n, ns, want);
 					s_slideSpeed  = ns;
 					s_slideLogged = (int)(ns * 10000.0f);
 					game::playbackSetSpeed(s_slideSpeed);
@@ -2754,10 +3049,22 @@ namespace render
 				s_slideCapture = true;
 				s_slideSample  = 0;
 				s_slideMark    = s_slideTime;   // where this frame's exposure opened
+				// Shutter open: back to the sub-sample step.
+				if (s_fxStep) game::fixedTimeSetStep(s_fxSampleMs);
 			}
 
 			// --- CAPTURE ------------------------------------------------------
-			if (!fxcapture::lastDone()) return;   // the addon missed a present
+			//
+			// HOLD THE CLIP, do not just skip. The engine steps on every Process()
+			// whether or not we captured, so returning here without holding would
+			// advance past a sub-sample that never made it into the accumulator -
+			// an exposure quietly short by one sample, per stutter.
+			if (!fxcapture::lastDone())
+			{
+				if (s_fxStep) game::fixedTimeHold(true);
+				return;
+			}
+			if (s_fxStep) game::fixedTimeHold(false);
 
 			const int want = s_cfg.samples < 1 ? 1 : s_cfg.samples;
 
@@ -2925,7 +3232,10 @@ namespace render
 			{
 				if (++s_dofRetries > kDofMaxRetries)
 				{
-					finish("aborted - the depth-of-field pass kept being refused", false);
+					finish("aborted - the depth-of-field pass kept being refused. The usual "
+					       "cause is the IgcsDOF technique not being enabled in ReShade - "
+					       "turn it on from the Home tab and drag it to the bottom of the "
+					       "list. ReShade's own log names the reason", false);
 					return;
 				}
 				logger::write("info",

@@ -197,7 +197,7 @@ namespace menu
 			// place is the honest version.
 			ROW_G_HEADER,
 			ROW_COLLISION, ROW_DISTANCE, ROW_STREAMFOCUS, ROW_ZOOM,
-			ROW_G_PATH, ROW_G_ROT, ROW_G_FOV, ROW_G_ALPHA, ROW_G_PROFILE,
+			ROW_G_PATH, ROW_G_ROT, ROW_G_FOV, ROW_G_ALPHA, ROW_G_PROFILE, ROW_G_WEIGHT,
 			// Scene page. These do not touch the .clip - they substitute values
 			// as the frame is played, so they are live and they are undone the
 			// moment the row goes back to "As Recorded".
@@ -306,6 +306,17 @@ namespace menu
 		// Curve shape is exposed as three named choices rather than a raw alpha
 		// slider - the values that matter are the three named ones, and a menu
 		// row you step with left/right suits a choice better than a float.
+		const float kWeightVals[] = { 0.0f, 0.25f, 0.5f, 0.75f, 1.0f };
+		int weightIndex()
+		{
+			// Nearest, not exact: the ini takes any float and the row still has
+			// to show something honest for 0.31.
+			const float w = Config::get().splineWeight;
+			int best = 0;
+			for (int i = 1; i < 5; ++i)
+				if (fabsf(w - kWeightVals[i]) < fabsf(w - kWeightVals[best])) best = i;
+			return best;
+		}
 		const float kAlphaVals[]  = { 0.0f, 0.5f, 1.0f };
 		const char* const kAlphaText[] = { "Uniform", "Centripetal", "Chordal" };
 		inline int alphaIndex()
@@ -411,6 +422,7 @@ namespace menu
 					s_rows[s_shown++] = ROW_G_FOV;
 					s_rows[s_shown++] = ROW_G_ALPHA;
 					s_rows[s_shown++] = ROW_G_PROFILE;
+					s_rows[s_shown++] = ROW_G_WEIGHT;
 				}
 				else if (g_page == PAGE_LIMITS)
 				{
@@ -536,6 +548,7 @@ namespace menu
 			case ROW_G_ROT:     return "Spline Rotation";
 			case ROW_G_FOV:     return "Spline Zoom";
 			case ROW_G_ALPHA:   return "Curve Shape";
+			case ROW_G_WEIGHT:  return "Camera Weight";
 			case ROW_G_PROFILE: return "Speed Profile";
 			case ROW_G_HEADER:  return "Rockstar Editor+";
 			case ROW_S_TIME:    return "Time of Day";
@@ -638,6 +651,11 @@ namespace menu
 				return (Config::get().splineOrientation ? "On" : "Off");
 			if (row == ROW_G_FOV)
 				return (Config::get().splineFov ? "On" : "Off");
+			if (row == ROW_G_WEIGHT)
+			{
+				static const char* const kW[] = { "Off", "Light", "Medium", "Heavy", "Full" };
+				return kW[weightIndex()];
+			}
 			if (row == ROW_G_ALPHA)
 				return kAlphaText[alphaIndex()];
 			if (row == ROW_G_PROFILE)
@@ -715,6 +733,7 @@ namespace menu
 			case ROW_SHAKE_MODE:
 			case ROW_STOP_STILL: return 2;
 			case ROW_G_ALPHA:   return 3;
+			case ROW_G_WEIGHT:  return 5;
 			case ROW_G_HEADER:  return PAGE_COUNT;
 			case ROW_G_PROFILE: return 3;
 			// +1 for the "As Recorded" / "None" slot each of these carries.
@@ -836,6 +855,10 @@ namespace menu
 			case ROW_G_PATH:  return "Replace the marker-to-marker camera PATH with a curve.";
 			case ROW_G_ROT:   return "Replace the marker-to-marker camera ROTATION with a curve.";
 			case ROW_G_FOV:   return "Replace the marker-to-marker ZOOM blend with a curve.";
+			case ROW_G_WEIGHT:
+				return !c.splinePosition
+					? "No effect while Spline Path is Off - this shapes the curve, and there is no curve until that is On."
+					: "How much MASS the camera has. Off hits every marker exactly, which reads as weightless. Higher lets the camera be carried past them the way a heavy rig is - the markers become where you steered, not where it went. Affects position only; the aim still snaps.";
 			case ROW_G_ALPHA:
 				return c.naturalPacing
 					? "No effect under Natural pacing: a time-driven path has no knot "
@@ -1154,6 +1177,16 @@ namespace menu
 				Config& c = Config::get();
 				c.splineFov = delta > 0;
 				c.writeBool("SplineFov", c.splineFov);
+				return;
+			}
+			if (row == ROW_G_WEIGHT)
+			{
+				Config& c = Config::get();
+				int i = weightIndex() + delta;
+				if (i < 0) i = 0;
+				if (i > 4) i = 4;
+				c.splineWeight = kWeightVals[i];
+				c.writeFloat("SplineWeight", c.splineWeight);
 				return;
 			}
 			if (row == ROW_G_ALPHA)
