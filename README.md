@@ -283,6 +283,43 @@ as shot, and what the rows say matches what playback does.
 > is exactly as it was shot. That also means the look is a setting rather than
 > an edit: set a row back to *As Recorded* and it is gone.
 
+### Scene lights
+
+Free-standing point and spot lights placed anywhere in the world — the editor
+has none of its own, so a night shot is lit by whatever the map already has.
+
+**Rockstar Editor+ → Scene Lights** in the marker menu. Add a light, then:
+
+| | |
+|---|---|
+| **Grab** | the camera flies to the light and carries it while you move. Release and the camera returns to the shot you had |
+| **Place** | drops the light where the camera is and leaves it there |
+
+Colour, intensity, range and falloff for both types; cone angles for a spot;
+volume settings for a light meant to be seen in fog. A spot faces down its beam
+when grabbed, so you are looking at what it lights.
+
+**Shadows** are opt-in per light. Worth knowing before you wonder why one does
+not cast: the engine gives a shadow map to **eight lights in a scene**, scored
+by range over distance. In a busy street a scene light competes with every
+headlight and street lamp around it and can simply lose. Raising *Range* is the
+lever that wins a slot.
+
+**Two sets, and which one you are editing depends on where you are.** Inside a
+clip the lights belong to that clip and are saved with the project, under
+`lights\scenelights.txt`. Outside it, `RockstarEditorPlus\Lights.ini` is the
+set — and it is also the default every clip you have never lit starts from.
+Editing a clip's lights never writes back to it.
+
+That file is re-read every two seconds, so lights can be added, moved and
+retuned by hand without restarting the game.
+
+> Nothing ships enabled. The game consumes the light list on every frame it
+> renders, not only in the editor, so a light in that file lights free roam
+> too — which is the point if you want it, and a surprise if you do not.
+
+---
+
 ### Per-marker settings
 
 A marker's curve, shake and per-axis values are stored beside the project rather
@@ -665,6 +702,16 @@ Both files live in `RockstarEditorPlus\`, beside the `.asi`.
 | `LiveTimecycle` | 1 | re-light for the overridden time/weather instead of replaying the clip's baked keyframe |
 | `ShakeDebugLog` `SplineDebugLog` `SplineTraceLog` | 0 | diagnostics |
 
+### `Lights.ini`
+
+The default light set, and the one free roam uses. `Count` says how many
+`[LightN]` sections to read — **0 by default**, so nothing is lit until you ask.
+Max 32. Each section carries position, colour, intensity, range, falloff, cone
+angles for a spot, and `CastShadows`.
+
+Written back to when you edit lights outside a clip; inside one, the clip's own
+set is written instead and this file is left alone.
+
 ### `Render.ini`
 
 The seven rows on the editor's Export screen write straight into this file, so
@@ -698,11 +745,13 @@ RockstarEditorPlus.asi
 RockstarEditorPlus\
     RockstarEditorPlus.ini          camera, shake, limits
     Render.ini                      rendering
+    Lights.ini                      default scene lights
     RE+ Render Settings.exe         editor for both of the above
     RockstarEditorPlus.log
     ffmpeg.exe                      bundled
     presets\                        codec presets
     markers\                        per-marker settings, one file per project
+    lights\                         per-clip scene lights
     Captures\render_0001\           frames, or video.mp4
 ```
 
