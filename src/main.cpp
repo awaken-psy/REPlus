@@ -9,6 +9,7 @@
 #include "capture/fxcapture.h"
 #include "capture/render.h"
 #include "capture/exporthook.h"
+#include "lights/lights.h"
 
 static bool bInited = false;
 static void (*origGetSystemTimeAsFileTime)(LPFILETIME) = nullptr;
@@ -33,6 +34,7 @@ static void InstallResolved()
 	precache::install();
 	scene::install();
 	exporthook::install();
+	lights::install();
 	// After exporthook, which owns what the Export button DOES; this owns the
 	// rows on the screen that configure it.
 	exportmenu::install();

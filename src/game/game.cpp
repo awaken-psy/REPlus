@@ -59,6 +59,9 @@ namespace game
 	uintptr_t addr_PacketWeatherExtract= 0;
 	uintptr_t addr_g_TcVarInfos        = 0;
 	uintptr_t addr_SetCursorSpeed      = 0;
+	uintptr_t addr_AddSceneLight       = 0;
+	uintptr_t addr_LightConsumer       = 0;
+	uintptr_t addr_g_SceneLights       = 0;
 	uintptr_t addr_SetNextPlayBackState= 0;
 	uintptr_t addr_g_ReplayMode        = 0;
 
@@ -1207,6 +1210,32 @@ namespace game
 		resolveExportMenu();
 		logger::write("info", "  export menu rows: %s",
 			exportMenuReady() ? "available" : "UNAVAILABLE");
+
+		// --- Scene lights -------------------------------------------------
+		//
+		// Optional: unresolved just means no scene lights, and everything else
+		// carries on. Deliberately all-or-nothing — lights::install() checks
+		// all three, so a build that drifted on any one of them loses the
+		// feature rather than injecting into something that is no longer a
+		// light list.
+		{
+			const uintptr_t addLight = memory::scan(pick(gsig::LIGHT_ADDSCENELIGHT), true).address;
+			if (addLight)
+			{
+				addr_AddSceneLight = addLight;
+				addr_LightConsumer = memory::scan(pick(gsig::LIGHT_CONSUMER), true).address;
+
+				// Derive lands on the count on Enhanced and on the descriptor
+				// base on Legacy; LIGHT_DESC_ADJ reconciles the two.
+				const uintptr_t d = derive(addLight, pickD(gsig::LIGHT_SCENELIGHTS), "g_SceneLights");
+				if (d)
+					addr_g_SceneLights = d + (isEnhanced() ? gsig::LIGHT_DESC_ADJ_ENH
+					                                       : gsig::LIGHT_DESC_ADJ_LEG);
+			}
+			logger::write("info", "  scene lights: %s",
+				(addr_AddSceneLight && addr_LightConsumer && addr_g_SceneLights)
+					? "available" : "UNAVAILABLE");
+		}
 
 		// GetPreviousMarkerIndex is deliberately NOT required: Clang inlines it
 		// on Enhanced, so there is nothing to resolve there and prevMarkerIndex()

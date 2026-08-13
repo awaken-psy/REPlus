@@ -236,9 +236,55 @@ RenderMarkerSpeed=1        ; render a marker's slow/fast motion. 0 = ignore it
 AudioFromFile=
 ]==])
 
+set(REP_INI_LIGHTS [==[
+; RockstarEditorPlus - scene lights.
+;
+; The whole set is re-read every 2 seconds, so lights can be added, moved,
+; retuned and toggled without restarting the game.
+;
+; This file is the DEFAULT set: what free roam uses, and what a clip you have
+; never lit starts from. Per-clip lights live in lights\scenelights.txt and
+; are saved with the project, not here.
+
+[Lights]
+; How many [LightN] sections below to read. Max 32.
+;
+; ZERO by default, deliberately: the light list is consumed on every frame the
+; game renders, not just in the editor, so a light that ships enabled would be
+; lighting the world before anyone asked for one. Add lights from the editor
+; menu - Rockstar Editor+ > Scene Lights - or raise this and fill in the
+; sections below.
+Count=0
+
+; ---------------------------------------------------------------------------
+; Reference for the hand-edited form. Ignored while Count=0.
+; ---------------------------------------------------------------------------
+; [Light0]
+; Enabled=1
+; Type=0            ; 0 = point, 1 = spot
+; X=0.0
+; Y=0.0
+; Z=0.0
+; R=1.0
+; G=0.85
+; B=0.60
+; Intensity=10.0
+; Range=40.0
+; Falloff=8.0
+; CastShadows=1     ; only eight lights in a scene get a shadow map
+;
+; Spot only. Aim in degrees, same convention as the free camera: yaw 0 faces
+; +Y, positive pitch tilts up, so -90 points straight down.
+; Pitch=-90.0
+; Yaw=0.0
+; ConeInner=10.0
+; ConeOuter=45.0
+]==])
+
 # Staged inside the build tree, never in the source tree.
 file(WRITE "${CMAKE_BINARY_DIR}/ini/RockstarEditorPlus.ini" "${REP_INI_MAIN}")
 file(WRITE "${CMAKE_BINARY_DIR}/ini/Render.ini"             "${REP_INI_RENDER}")
+file(WRITE "${CMAKE_BINARY_DIR}/ini/Lights.ini"             "${REP_INI_LIGHTS}")
 
 # copy_if_different, so a user's edited settings beside the .asi are not
 # clobbered on every rebuild - only replaced when the shipped text really changed.
@@ -249,6 +295,9 @@ add_custom_command(TARGET RockstarEditorPlus POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${CMAKE_BINARY_DIR}/ini/Render.ini"
             "$<TARGET_FILE_DIR:RockstarEditorPlus>/Render.ini"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_BINARY_DIR}/ini/Lights.ini"
+            "$<TARGET_FILE_DIR:RockstarEditorPlus>/Lights.ini"
     COMMENT "Writing the generated .ini files next to the .asi")
 
 set_target_properties( minhook

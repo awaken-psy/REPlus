@@ -13,4 +13,14 @@ namespace menu
 	// the menu addresses did not resolve — it simply does nothing and the
 	// spline keeps working off the ini alone.
 	void install();
+
+	// The marker the editor currently has OPEN - what the per-marker rows edit.
+	// Null outside the editor, or when the addresses behind it did not resolve.
+	//
+	// Exposed because the scene-light track has to key against the same marker
+	// the menu does. The DIRECTOR's current marker is a different thing: it
+	// follows the playhead, so selecting a marker in the list moves this one and
+	// not that one, and a track keyed on the director's would keep filing edits
+	// against whichever marker was open before.
+	void* currentEditMarker();
 }

@@ -346,5 +346,14 @@ namespace game
 
 	// Dereferences the global slot to the live IReplayMarkerStorage*.
 	void* markerStorage();
+
+	// --- Scene lights (see lights/lights.h) -------------------------------
+	//
+	// All three or none: lights::install() refuses to hook unless every one
+	// resolved, so a drifted build loses the lights rather than injecting into
+	// something that is no longer a light list.
+	extern uintptr_t addr_AddSceneLight; // CLightSource* AddSceneLight()
+	extern uintptr_t addr_LightConsumer; // per-frame: renders the list, clears it
+	extern uintptr_t addr_g_SceneLights; // data +0, count u16 +8, cap u16 +0xA
 }
 

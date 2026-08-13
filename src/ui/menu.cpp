@@ -11,6 +11,9 @@
 #include "replay/marker.h"
 #include "replay/settings.h"
 #include "replay/shake.h"
+#include "lights/lights.h"
+#include "lights/lightmodel.h"
+#include "lights/lightstore.h"
 
 #include <cstdio>
 
@@ -167,7 +170,7 @@ namespace menu
 		// is the one group here that changes what the shot LOOKS like rather
 		// than what the camera is allowed to do.
 		enum { PAGE_CLOSED = 0, PAGE_CURVE, PAGE_LIMITS, PAGE_SCENE, PAGE_FOCUS,
-		       PAGE_COUNT };
+		       PAGE_LIGHTS, PAGE_COUNT };
 		int  g_page         = PAGE_CLOSED;
 		bool g_stockShakeSet = false; // marker has a GAME shake, so the camera
 		                              // menu will also draw intensity + speed
@@ -212,6 +215,14 @@ namespace menu
 			ROW_APPLY_ALL,
 			// Simple-mode enum rows. The numeric ones live below with the rest.
 			ROW_SHAKE_MODE, ROW_STOP_STILL, ROW_DOF_AF,
+			// Scene lights. Select/Enabled/Type/Shadows are named choices;
+			// Place and Delete are actions; the rest are numeric (below).
+			ROW_L_SELECT, ROW_L_SECTION, ROW_L_ADD,
+			ROW_L_ENABLED, ROW_L_TYPE, ROW_L_GRAB,
+			ROW_L_SHADOWS,
+			ROW_L_SHADOWQ, ROW_L_VOLUMETRIC, ROW_L_NOSPEC,
+			ROW_L_VIS, ROW_L_REFL, ROW_L_CORONA, ROW_L_BLACKOUT, ROW_L_INTSHADOW,
+			ROW_L_PLACE, ROW_L_DELETE,
 			ROW_NUM_FIRST,                 // everything below is numeric
 			ROW_INTENSITY = ROW_NUM_FIRST, ROW_FREQ_MUL, ROW_VARIATION,
 			ROW_SPEED_AMP, ROW_SPEED_FREQ,
@@ -225,6 +236,10 @@ namespace menu
 			// position - the lookup is by index, so a row added to one and not
 			// the other silently edits a different parameter.
 			ROW_DOF_DELTA,
+			ROW_L_INTENSITY, ROW_L_RANGE, ROW_L_CONE,
+			ROW_L_R, ROW_L_G, ROW_L_B,
+			ROW_L_FALLOFF, ROW_L_CONEIN,
+			ROW_L_VOLINT, ROW_L_VOLSIZE, ROW_L_VOLEXP,
 			ROW_LOGICAL_MAX
 		};
 
@@ -301,11 +316,138 @@ namespace menu
 		// Drawn with ADD_COLUMN_ITEM, exactly like the stock "Edit Camera" row,
 		// so it carries no arrows to suggest otherwise. Its state lives in the
 		// help line, which is where a row with no value column has to put it.
-		inline bool isActionRow(int row) { return row == ROW_APPLY_ALL; }
+		inline bool isActionRow(int row)
+		{
+			return row == ROW_APPLY_ALL || row == ROW_L_PLACE ||
+			       row == ROW_L_DELETE;
+		}
 
 		// Two presses to fire, because this overwrites the shake settings on
 		// every marker in the project and there is no undo. Armed by the first
 		// accept, cleared by literally anything else - see hkMenuInput.
+		// Which light the Lights page is editing. Clamped on use rather than on
+		// change, so deleting the last light cannot leave it dangling.
+		int s_light = 0;
+
+		// The stock marker menu already spends nine of the column's sixteen rows
+		// before ours begin, so the whole light editor cannot be one flat list -
+		// the first version ran to seventeen and the last four rows silently fell
+		// off the end. Sections keep any one screen inside the budget, the same
+		// way the Camera submenu's group row does.
+		enum { LSEC_SETUP = 0, LSEC_LOOK, LSEC_CONE, LSEC_COLOUR, LSEC_VOLUME,
+		       LSEC_FLAGS, LSEC_VIS, LSEC_COUNT };
+
+		// An INDEX into the list built by sectionList(), NOT an LSEC_ value.
+		// A point light has no Cone section, so the two stop lining up.
+		int s_lsec = 0;
+
+		inline int lightCount() { return lightmodel::Count(); }
+		inline int lightIndex()
+		{
+			const int n = lightCount();
+			if (n <= 0) return -1;
+			if (s_light < 0) s_light = 0;
+			if (s_light >= n) s_light = n - 1;
+			return s_light;
+		}
+		// Several flags are mutually exclusive triples rather than toggles -
+		// interior/exterior, and the two reflection bits. Reading them as an
+		// index and writing back exclusively keeps the row honest: you cannot
+		// end up with both "hidden in reflections" and "only in reflections"
+		// set at once, which the raw Flags field would happily allow.
+		inline int triGet(unsigned f, unsigned a, unsigned b)
+		{
+			if (f & a) return 1;
+			if (f & b) return 2;
+			return 0;
+		}
+		inline void triSet(unsigned& f, unsigned a, unsigned b, int idx)
+		{
+			f &= ~(a | b);
+			if (idx == 1) f |= a;
+			else if (idx == 2) f |= b;
+		}
+
+		// Which sections this light has, in order.
+		//
+		// Cone is spot-only: a point light has no cone at all, so the whole
+		// section drops out rather than offering two rows that cannot do
+		// anything - the same call the Shadow Quality row already makes.
+		int sectionList(int li, int out[LSEC_COUNT])
+		{
+			const bool spot = li >= 0 &&
+				lightmodel::Mutable(li).p.type == lightbuild::kSpot;
+			int n = 0;
+			out[n++] = LSEC_SETUP;
+			out[n++] = LSEC_LOOK;
+			if (spot) out[n++] = LSEC_CONE;
+			out[n++] = LSEC_COLOUR;
+			out[n++] = LSEC_VOLUME;
+			out[n++] = LSEC_FLAGS;
+			out[n++] = LSEC_VIS;
+			return n;
+		}
+
+		int sectionCount(int li)
+		{
+			int list[LSEC_COUNT];
+			return sectionList(li, list);
+		}
+
+		// The LSEC_ the cursor sits on, clamped - switching a spot to a point
+		// removes a section from under it.
+		int currentSection(int li)
+		{
+			int list[LSEC_COUNT];
+			const int n = sectionList(li, list);
+			if (s_lsec < 0) s_lsec = 0;
+			if (s_lsec >= n) s_lsec = n - 1;
+			return list[s_lsec];
+		}
+
+		inline bool isLightRow(int row)
+		{
+			return (row >= ROW_L_SELECT && row <= ROW_L_DELETE) ||
+			       (row >= ROW_L_INTENSITY && row <= ROW_L_VOLEXP);
+		}
+
+		// Create a light where the camera is, select it, and make it exist at
+		// every keyframe. Returns the new index, or -1 when the set is full.
+		//
+		// One helper rather than two call sites, because an empty set shows Add
+		// on its own row AND accepts on the Light cursor - two ways in, but only
+		// one definition of what adding means.
+		int addLightAtCamera()
+		{
+			lightmodel::Entry e{};
+
+			float p[3], d[3];
+			if (lights::cameraPos(p))
+			{
+				e.p.pos[0] = p[0]; e.p.pos[1] = p[1]; e.p.pos[2] = p[2];
+			}
+			// The aim as well. A new light is a point light and ignores it, but
+			// switching it to a spot afterwards then points where you were
+			// looking rather than along whatever the default axis happened to be.
+			if (lights::cameraAim(d))
+			{
+				e.p.dir[0] = d[0]; e.p.dir[1] = d[1]; e.p.dir[2] = d[2];
+			}
+
+			const int idx = lightmodel::Add(e);
+			if (idx < 0)
+			{
+				logger::write("info", "lights: the set is full (%d) - not added",
+					lightmodel::kMaxLights);
+				return -1;
+			}
+
+			s_light = idx;
+			lightstore::lightAdded(idx);   // structural: every keyframe
+			lights::commitAll();
+			return idx;
+		}
+
 		bool s_applyArmed = false;
 		int  s_appliedTo  = -1;   // markers written by the last apply, -1 = none yet
 
@@ -420,6 +562,10 @@ namespace menu
 			}
 		}
 
+		// Defined further down with the rest of the Scaleform plumbing; needed
+		// here so the lights page can trim itself to what the column will draw.
+		int menuOptionCount();
+
 		void buildRows()
 		{
 			s_shown = 0;
@@ -445,6 +591,103 @@ namespace menu
 					s_rows[s_shown++] = ROW_DOF_AF;
 					s_rows[s_shown++] = ROW_DOF_DELTA;
 					s_rows[s_shown++] = ROW_STEP;
+					return;
+				}
+				if (g_page == PAGE_LIGHTS)
+				{
+					// Add is always reachable, even with an empty set - otherwise
+					// the page is a dead end on a fresh install.
+					s_rows[s_shown++] = ROW_L_SELECT;
+					const int li = lightIndex();
+					if (li < 0)
+					{
+						// Nothing to section up yet, so skip straight to the one
+						// action that can produce something to edit.
+						s_rows[s_shown++] = ROW_L_ADD;
+					}
+					else
+					{
+						s_rows[s_shown++] = ROW_L_SECTION;
+
+						switch (currentSection(li))
+						{
+						// Five content rows is the ceiling here - the stock marker
+						// menu spends eight of the column's sixteen before ours
+						// begin, and the header, the Light cursor and the section
+						// row take three more. Adding Add is what pushed Enabled
+						// out to Visibility, where it reads better anyway: it
+						// answers whether the light renders at all.
+						case LSEC_SETUP:
+							s_rows[s_shown++] = ROW_L_ADD;
+							s_rows[s_shown++] = ROW_L_TYPE;
+							// Above Place/Delete deliberately: it is the only way
+							// to MOVE a light once it exists, so it is reached for
+							// far more often than either of them.
+							s_rows[s_shown++] = ROW_L_GRAB;
+							s_rows[s_shown++] = ROW_L_PLACE;
+							s_rows[s_shown++] = ROW_L_DELETE;
+							break;
+						case LSEC_LOOK:
+							s_rows[s_shown++] = ROW_L_INTENSITY;
+							s_rows[s_shown++] = ROW_L_RANGE;
+							s_rows[s_shown++] = ROW_L_FALLOFF;
+							s_rows[s_shown++] = ROW_STEP;
+							break;
+						case LSEC_CONE:
+							s_rows[s_shown++] = ROW_L_CONE;
+							s_rows[s_shown++] = ROW_L_CONEIN;
+							s_rows[s_shown++] = ROW_STEP;
+							break;
+						case LSEC_VOLUME:
+							s_rows[s_shown++] = ROW_L_VOLINT;
+							s_rows[s_shown++] = ROW_L_VOLSIZE;
+							s_rows[s_shown++] = ROW_L_VOLEXP;
+							s_rows[s_shown++] = ROW_STEP;
+							break;
+						case LSEC_COLOUR:
+							s_rows[s_shown++] = ROW_L_R;
+							s_rows[s_shown++] = ROW_L_G;
+							s_rows[s_shown++] = ROW_L_B;
+							s_rows[s_shown++] = ROW_STEP;
+							break;
+						case LSEC_FLAGS:
+							s_rows[s_shown++] = ROW_L_SHADOWS;
+							// Shadow quality means nothing without shadows, and a live
+							// row that does nothing is worse than one that is absent.
+							if (lightmodel::Mutable(li).p.flags & lightbuild::kCastShadows)
+								s_rows[s_shown++] = ROW_L_SHADOWQ;
+							s_rows[s_shown++] = ROW_L_VOLUMETRIC;
+							s_rows[s_shown++] = ROW_L_NOSPEC;
+							// A render MODE rather than a visibility question -
+							// the light still exists everywhere it did, it just
+							// draws only its own glow.
+							s_rows[s_shown++] = ROW_L_CORONA;
+							break;
+						default:
+							// Visibility is "does this render, and where".
+							s_rows[s_shown++] = ROW_L_ENABLED;
+							s_rows[s_shown++] = ROW_L_VIS;
+							s_rows[s_shown++] = ROW_L_REFL;
+							s_rows[s_shown++] = ROW_L_BLACKOUT;
+							s_rows[s_shown++] = ROW_L_INTSHADOW;
+							break;
+						}
+					}
+
+					// Last line of defence. The stock row count is not ours to
+					// control and could grow on a marker type we have not seen,
+					// so rather than trusting the arithmetic above, drop what
+					// will not be drawn and SAY so - a row that silently is not
+					// there is the one bug this page has already had once.
+					const int room = kColumnCapacity - menuOptionCount();
+					if (s_shown > room)
+					{
+						logger::write("info",
+							"menu: lights page wants %d rows, only %d fit - "
+							"trimming. Move something to another section.",
+							s_shown, room);
+						s_shown = room > 0 ? room : 0;
+					}
 					return;
 				}
 				if (g_page == PAGE_CURVE)
@@ -590,6 +833,36 @@ namespace menu
 			case ROW_S_WETNESS: return "Wetness";
 			case ROW_S_TIMECYCLE: return "Timecycle";
 			case ROW_APPLY_ALL: return "Apply Shake to All";
+
+			// --- scene lights ---
+			case ROW_L_SELECT:    return "Light";
+			case ROW_L_SECTION:   return "Editing";
+			case ROW_L_ENABLED:   return "Enabled";
+			case ROW_L_TYPE:      return "Type";
+			case ROW_L_ADD:       return "Add Light";
+			case ROW_L_GRAB:      return "Move with Camera";
+			case ROW_L_PLACE:     return "Place at Camera";
+			case ROW_L_DELETE:    return "Delete Light";
+			case ROW_L_INTENSITY: return "Intensity";
+			case ROW_L_RANGE:     return "Range";
+			case ROW_L_CONE:      return "Cone Outer";
+			case ROW_L_CONEIN:    return "Cone Inner";
+			case ROW_L_FALLOFF:   return "Falloff";
+			case ROW_L_VOLINT:    return "Volume Intensity";
+			case ROW_L_VOLSIZE:   return "Volume Size";
+			case ROW_L_VOLEXP:    return "Volume Falloff";
+			case ROW_L_R:         return "Red";
+			case ROW_L_G:         return "Green";
+			case ROW_L_B:         return "Blue";
+			case ROW_L_SHADOWS:    return "Cast Shadows";
+			case ROW_L_SHADOWQ:    return "Shadow Quality";
+			case ROW_L_VOLUMETRIC: return "Volumetric";
+			case ROW_L_NOSPEC:     return "Specular";
+			case ROW_L_VIS:        return "Visible";
+			case ROW_L_REFL:       return "Reflections";
+			case ROW_L_CORONA:     return "Corona Only";
+			case ROW_L_BLACKOUT:   return "Ignore Blackout";
+			case ROW_L_INTSHADOW:  return "Interior Shadows";
 			case ROW_SHAKE_MODE: return "Shake Mode";
 			case ROW_INTENSITY:  return "Shake Amplitude";
 			case ROW_FREQ_MUL:   return "Shake Frequency";
@@ -680,12 +953,111 @@ namespace menu
 				return buf;
 			}
 
+			// --- scene lights ---
+			if (isLightRow(row))
+			{
+				const int li = lightIndex();
+				if (row == ROW_L_SELECT)
+				{
+					if (li < 0) return "none - press to add";
+					// The key count only appears once there is more than one,
+					// because until then there is nothing being animated and
+					// the number would just be noise on every clip.
+					{
+						const int keys = lightstore::keyCount();
+						if (keys > 1)
+							sprintf_s(buf, "%d / %d  (%d keys)", li + 1,
+							          lightCount(), keys);
+						else
+							sprintf_s(buf, "%d / %d", li + 1, lightCount());
+					}
+					return buf;
+				}
+				if (li < 0) return "";
+				if (row == ROW_L_SECTION)
+				{
+					// One name per LSEC_*, checked. The row's option count is
+					// LSEC_COUNT, so a missing name here is not a wrong label -
+					// it is an out-of-bounds read handed to the game as a string,
+					// which crashes on the first section that has no entry.
+					static const char* const kSec[] = { "Setup", "Look", "Cone",
+					                                    "Colour", "Volume",
+					                                    "Flags", "Visibility" };
+					static_assert(sizeof(kSec) / sizeof(*kSec) == LSEC_COUNT,
+					              "section names must match the LSEC_* enum");
+					// Indexed by LSEC_ value, not by the cursor: the cursor is a
+					// position in a list whose length depends on the light type.
+					const int sec = currentSection(li);
+					return kSec[sec >= 0 && sec < LSEC_COUNT ? sec : 0];
+				}
+
+				const lightbuild::LightParams& lp = lightmodel::Mutable(li).p;
+				switch (row)
+				{
+				case ROW_L_ENABLED:
+					return lightmodel::Mutable(li).enabled ? "On" : "Off";
+				case ROW_L_TYPE:
+					return lp.type == lightbuild::kSpot ? "Spot" : "Point";
+				case ROW_L_SHADOWS:
+					return (lp.flags & lightbuild::kCastShadows) ? "On" : "Off";
+				case ROW_L_SHADOWQ:
+				{
+					static const char* const kQ[] = { "Normal", "Higher Res", "Low Res Only" };
+					return kQ[triGet(lp.flags, lightbuild::kCastHigherResShadow,
+					                 lightbuild::kCastOnlyLowResShadows)];
+				}
+				case ROW_L_VOLUMETRIC:
+					return (lp.flags & lightbuild::kVolumeDrawing) ? "On" : "Off";
+				// Inverted on purpose: the flag is NO_SPECULAR, but a row reading
+				// "Specular: On" is what someone is actually looking for.
+				case ROW_L_NOSPEC:
+					return (lp.flags & lightbuild::kNoSpecular) ? "Off" : "On";
+				case ROW_L_VIS:
+				{
+					static const char* const kV[] = { "Indoors + Out", "Indoors Only", "Outdoors Only" };
+					return kV[triGet(lp.flags, lightbuild::kInteriorOnly,
+					                 lightbuild::kExteriorOnly)];
+				}
+				case ROW_L_REFL:
+				{
+					static const char* const kR[] = { "Normal", "Hidden In", "Only In" };
+					return kR[triGet(lp.flags, lightbuild::kDontRenderInReflection,
+					                 lightbuild::kOnlyRenderInReflection)];
+				}
+				case ROW_L_CORONA:
+					return (lp.flags & lightbuild::kOnlyCorona) ? "On" : "Off";
+				case ROW_L_BLACKOUT:
+					return (lp.flags & lightbuild::kFx) ? "On" : "Off";
+				case ROW_L_INTSHADOW:
+					return (lp.flags & lightbuild::kCutscene) ? "On" : "Off";
+				// Reads off the grab itself, not off a menu flag, so the row is
+				// still honest when something else drops it - a clip change
+				// releases the grab without the menu being involved.
+				case ROW_L_GRAB:
+					return lights::grabbed() == li ? "Driving" : "Off";
+				case ROW_L_INTENSITY: sprintf_s(buf, "%.2f", lp.intensity); return buf;
+				case ROW_L_RANGE:     sprintf_s(buf, "%.2f m", lp.range);   return buf;
+				case ROW_L_CONE:      sprintf_s(buf, "%.1f deg", lp.outerAngle); return buf;
+				case ROW_L_CONEIN:    sprintf_s(buf, "%.1f deg", lp.innerAngle); return buf;
+				case ROW_L_FALLOFF:   sprintf_s(buf, "%.2f", lp.falloff);    return buf;
+				case ROW_L_VOLINT:    sprintf_s(buf, "%.2f", lp.volIntensity); return buf;
+				case ROW_L_VOLSIZE:   sprintf_s(buf, "%.2f", lp.volSize);    return buf;
+				case ROW_L_VOLEXP:    sprintf_s(buf, "%.2f", lp.volExponent); return buf;
+				case ROW_L_R:         sprintf_s(buf, "%.2f", lp.colour[0]); return buf;
+				case ROW_L_G:         sprintf_s(buf, "%.2f", lp.colour[1]); return buf;
+				case ROW_L_B:         sprintf_s(buf, "%.2f", lp.colour[2]); return buf;
+				default: break;
+				}
+				return "";
+			}
+
 			// --- global rows (top-level marker menu) ---
 			if (row == ROW_G_HEADER)
 				return g_page == PAGE_CURVE  ? "Curve"
 				     : g_page == PAGE_LIMITS ? "Limits"
 				     : g_page == PAGE_SCENE  ? "Scene"
 				     : g_page == PAGE_FOCUS  ? "Depth of Field"
+				     : g_page == PAGE_LIGHTS ? "Scene Lights"
 				                             : "Closed";
 			if (row == ROW_G_PATH)
 				return (Config::get().splinePosition ? "On" : "Off");
@@ -778,6 +1150,23 @@ namespace menu
 			case ROW_G_ALPHA:   return 3;
 			case ROW_G_WEIGHT:  return 5;
 			case ROW_G_HEADER:  return PAGE_COUNT;
+
+			// Arrows step through the set; the count is not fixed, so give it
+			// something non-zero and let adjust() do the wrapping.
+			case ROW_L_SELECT:  return 2;
+			case ROW_L_SECTION: return sectionCount(lightIndex());
+			case ROW_L_ENABLED: return 2;
+			case ROW_L_TYPE:    return 2;
+			case ROW_L_GRAB:    return 2;
+			case ROW_L_SHADOWS:    return 2;
+			case ROW_L_VOLUMETRIC: return 2;
+			case ROW_L_NOSPEC:     return 2;
+			case ROW_L_CORONA:     return 2;
+			case ROW_L_BLACKOUT:   return 2;
+			case ROW_L_INTSHADOW:  return 2;
+			case ROW_L_SHADOWQ:    return 3;
+			case ROW_L_VIS:        return 3;
+			case ROW_L_REFL:       return 3;
 			case ROW_G_PROFILE: return 3;
 			// +1 for the "As Recorded" / "None" slot each of these carries.
 			case ROW_S_TIME:    return kTimeSlots + 1;
@@ -862,6 +1251,95 @@ namespace menu
 				return "Fade the shake out while the camera is parked.";
 			case ROW_DOF_AF:
 				return "Measure focus in the WORLD each frame, at the centre of frame. Off uses Focus Distance instead. Depth-of-field renders only - it does not change the preview.";
+			// --- scene lights ---
+			case ROW_L_SELECT:
+				return lightCount() == 0
+					? "No lights yet. Accept adds one at the camera."
+					: "Which light these rows edit. Lights are saved in "
+					  "RockstarEditorPlusLights.ini next to the .asi.";
+			case ROW_L_SECTION:
+				return "Which block of settings the rows below show. The column "
+				       "only draws 16 items and the stock rows take most of them.";
+			case ROW_L_ENABLED:
+				return "Turn this light off without deleting it.";
+			case ROW_L_TYPE:
+				return "Point casts in every direction. Spot is a cone, aimed "
+				       "where the camera was looking when you last placed it.";
+			case ROW_L_PLACE:
+				return "Move this light to the camera. A spot also takes the "
+				       "camera's aim, so it lights what you are looking at.";
+			case ROW_L_ADD:
+				return "Add another light at the camera, and select it. Up to 32 "
+				       "per clip; each one keeps its own keyframes.";
+			case ROW_L_GRAB:
+				return "Fly the camera TO this light and drive it from there. "
+				       "Turn it off to drop the light and send the camera back "
+				       "to the shot you set up - your framing is not disturbed.";
+			case ROW_L_DELETE:
+				return "Remove this light from the set.";
+			case ROW_L_INTENSITY:
+				return "Brightness. Not normalized - values well above 1 are "
+				       "normal, and 10 to 40 is a usable range for a practical.";
+			case ROW_L_RANGE:
+				return "How far the light reaches, in metres.";
+			case ROW_L_CONE:
+				return "Spot cone width in degrees - the outer edge, where the "
+				       "light stops. The game clamps this to 89.";
+			case ROW_L_CONEIN:
+				return "Where the cone starts falling off. Close to Outer gives a "
+				       "hard edge; far below it gives a soft one. Held at least "
+				       "one degree under Outer, as the game does.";
+			case ROW_L_FALLOFF:
+				return "How sharply the light dies off with distance. Higher is "
+				       "tighter around the source; 8 is the engine's default.";
+			case ROW_L_VOLINT:
+				return "Brightness of the visible cone of air. Needs Volumetric "
+				       "on in Flags - without it these three do nothing.";
+			case ROW_L_VOLSIZE:
+				return "How wide the visible volume is relative to the light "
+				       "itself. Needs Volumetric on in Flags.";
+			case ROW_L_VOLEXP:
+				return "How sharply the visible volume fades out towards its "
+				       "edge. Needs Volumetric on in Flags.";
+			case ROW_L_R: case ROW_L_G: case ROW_L_B:
+				return "Colour, 0 to 1 per channel.";
+			case ROW_L_SHADOWQ:
+				// Not a quality setting at the bottom end: the shadow manager
+				// rejects any light carrying this bit outright (it tests
+				// flags & 0x200000 before handing out a slot), so it means
+				// "no shadow map", not "a cheap one".
+				return "Higher Res doubles this light's PRIORITY for one of the "
+				       "eight shadow slots a scene gets - use it in a busy "
+				       "interior. Low Res Only gives up the shadow map entirely.";
+			case ROW_L_VOLUMETRIC:
+				return "Draw the light's volume - visible shafts through the air. "
+				       "Reads best on a spot with something in the beam.";
+			case ROW_L_NOSPEC:
+				return "Specular highlights from this light. Off keeps the diffuse "
+				       "lift without hotspots on wet or shiny surfaces.";
+			case ROW_L_VIS:
+				return "Where the light is allowed to render. Indoors + Out is the "
+				       "safe default; the other two are the game's own interior and "
+				       "exterior classifications.";
+			case ROW_L_REFL:
+				return "Whether this light appears in reflections, only in them, or "
+				       "normally in both.";
+			case ROW_L_CORONA:
+				return "Draw only the corona - the glow at the source - with no light "
+				       "cast on the world.";
+			case ROW_L_INTSHADOW:
+				return "Let this light cast shadows indoors. Without it the game "
+				       "has no interior for the light, so its shadow map is built "
+				       "from the outside world only and nothing shows in a room.";
+			case ROW_L_BLACKOUT:
+				return "Keep this light when the city's artificial lights are "
+				       "switched off (a trainer blackout, or a clip recorded "
+				       "with one). Marks it an FX light, which is the class the "
+				       "engine keeps.";
+			case ROW_L_SHADOWS:
+				return "Cast shadows. Shadow-casting lights are more expensive "
+				       "than plain ones, so this is off by default.";
+
 			case ROW_DOF_DELTA:
 				return "Manual focus, in the add-on's own disparity units - the number its Focus Delta slider shows. Ignored while Autofocus is On. Interpolated between markers, so two values across a shot give a focus pull.";
 
@@ -1040,6 +1518,179 @@ namespace menu
 		// --- editing -----------------------------------------------------------
 		void adjust(int row, int delta, MarkerSettings& s)
 		{
+			// --- scene lights ---
+			if (isLightRow(row))
+			{
+				if (row == ROW_L_SELECT)
+				{
+					const int n = lightCount();
+					if (n > 0)
+					{
+						s_light = (s_light + delta) % n;
+						if (s_light < 0) s_light += n;
+					}
+					return;   // selection is not persisted; it is a cursor
+				}
+
+				const int li = lightIndex();
+				if (li < 0) return;
+
+				if (row == ROW_L_SECTION)
+				{
+					const int n = sectionCount(li);
+					if (n > 0)
+					{
+						s_lsec = (s_lsec + delta) % n;
+						if (s_lsec < 0) s_lsec += n;
+					}
+					return;   // a cursor, not a setting - nothing to persist
+				}
+
+				lightbuild::LightParams& lp = lightmodel::Mutable(li).p;
+				const float step = kStepVals[s_step];
+
+				switch (row)
+				{
+				case ROW_L_ENABLED:
+					lightmodel::Mutable(li).enabled = !lightmodel::Mutable(li).enabled;
+					break;
+				case ROW_L_TYPE:
+					lp.type = (lp.type == lightbuild::kSpot) ? lightbuild::kPoint
+					                                        : lightbuild::kSpot;
+					break;
+				case ROW_L_GRAB:
+					// A toggle, not a step: the row has two states and delta only
+					// ever says which way the stick went. Returning early rather
+					// than breaking because grab() has already published, and on
+					// release it has already persisted - the commit at the bottom
+					// of this block would just do both again.
+					lights::grab(lights::grabbed() == li ? -1 : li);
+					return;
+				case ROW_L_SHADOWS:
+					// All three together, matching what a real shadow-casting
+					// light carries - CAST_SHADOWS alone is not what the game
+					// ever sets.
+					if (lp.flags & lightbuild::kCastShadows)
+						// The quality bits go with them. Shadow Quality is only
+						// SHOWN while shadows are on, so a stale one left behind
+						// here is invisible in the menu and still in the flags -
+						// which is exactly how a light ended up reading
+						// 0x82104000: HIGHER_RES set with no shadow bits at all.
+						lp.flags &= ~(lightbuild::kCastShadows |
+						              lightbuild::kCastStaticShadows |
+						              lightbuild::kCastDynamicShadows |
+						              lightbuild::kCastHigherResShadow |
+						              lightbuild::kCastOnlyLowResShadows);
+					else
+						lp.flags |= lightbuild::kCastShadows |
+						            lightbuild::kCastStaticShadows |
+						            lightbuild::kCastDynamicShadows;
+					break;
+
+				// Scaled steps: intensity and range live in units where the
+				// shared 0.01 default would take a hundred presses to do
+				// anything useful, so they get a coarser multiple of it.
+				case ROW_L_INTENSITY:
+					lp.intensity += delta * step * 10.0f;
+					if (lp.intensity < 0.0f) lp.intensity = 0.0f;
+					break;
+				case ROW_L_RANGE:
+					lp.range += delta * step * 100.0f;
+					if (lp.range < 0.1f) lp.range = 0.1f;
+					break;
+				case ROW_L_CONE:
+					// The game clamps to [1,89] itself; matching it here means
+					// the number on screen is the number that gets used.
+					lp.outerAngle += delta * step * 100.0f;
+					if (lp.outerAngle < 1.0f)  lp.outerAngle = 1.0f;
+					if (lp.outerAngle > 89.0f) lp.outerAngle = 89.0f;
+					if (lp.innerAngle > lp.outerAngle - 1.0f)
+						lp.innerAngle = lp.outerAngle - 1.0f;
+					break;
+				case ROW_L_CONEIN:
+					// Same clamp from the other side. The game keeps inner at
+					// least a degree under outer, so anything else would be
+					// silently corrected out from under the row.
+					lp.innerAngle += delta * step * 100.0f;
+					if (lp.innerAngle < 1.0f) lp.innerAngle = 1.0f;
+					if (lp.innerAngle > lp.outerAngle - 1.0f)
+						lp.innerAngle = lp.outerAngle - 1.0f;
+					break;
+				case ROW_L_FALLOFF:
+					// Never zero: BuildLight substitutes the default for a
+					// non-positive falloff, so a row that could reach 0 would
+					// jump back to 8 with no explanation.
+					lp.falloff += delta * step * 10.0f;
+					if (lp.falloff < 0.1f)   lp.falloff = 0.1f;
+					if (lp.falloff > 100.0f) lp.falloff = 100.0f;
+					break;
+				case ROW_L_VOLINT:
+					lp.volIntensity += delta * step * 10.0f;
+					if (lp.volIntensity < 0.0f) lp.volIntensity = 0.0f;
+					break;
+				case ROW_L_VOLSIZE:
+					lp.volSize += delta * step * 10.0f;
+					if (lp.volSize < 0.0f) lp.volSize = 0.0f;
+					break;
+				case ROW_L_VOLEXP:
+					lp.volExponent += delta * step * 10.0f;
+					if (lp.volExponent < 0.0f) lp.volExponent = 0.0f;
+					break;
+
+				case ROW_L_VOLUMETRIC: lp.flags ^= lightbuild::kVolumeDrawing; break;
+				case ROW_L_NOSPEC:     lp.flags ^= lightbuild::kNoSpecular;   break;
+				case ROW_L_CORONA:     lp.flags ^= lightbuild::kOnlyCorona;   break;
+				// Blackout culls every artificial light except the FX class,
+				// right at the top of the per-light render. Setting FX is the
+				// whole workaround - nothing has to be hooked or patched.
+				case ROW_L_BLACKOUT:   lp.flags ^= lightbuild::kFx;          break;
+				// Makes the shadow manager resolve the light's interior from its
+				// position - see kCutscene in lightbuild.h. Nothing to do with
+				// cutscenes for us; that is just the bit the engine gates it on.
+				case ROW_L_INTSHADOW:  lp.flags ^= lightbuild::kCutscene;    break;
+
+				case ROW_L_SHADOWQ:
+					triSet(lp.flags, lightbuild::kCastHigherResShadow,
+					       lightbuild::kCastOnlyLowResShadows,
+					       (triGet(lp.flags, lightbuild::kCastHigherResShadow,
+					               lightbuild::kCastOnlyLowResShadows) + delta + 3) % 3);
+					break;
+				case ROW_L_VIS:
+					triSet(lp.flags, lightbuild::kInteriorOnly,
+					       lightbuild::kExteriorOnly,
+					       (triGet(lp.flags, lightbuild::kInteriorOnly,
+					               lightbuild::kExteriorOnly) + delta + 3) % 3);
+					// INT_AND_EXT is what "both" means to the game's own fixup, so
+					// it has to be set and cleared in step with the exclusive bits -
+					// otherwise SetCommon reclassifies the light behind us.
+					if (triGet(lp.flags, lightbuild::kInteriorOnly,
+					           lightbuild::kExteriorOnly) == 0)
+						lp.flags |= lightbuild::kIntAndExt;
+					else
+						lp.flags &= ~lightbuild::kIntAndExt;
+					break;
+				case ROW_L_REFL:
+					triSet(lp.flags, lightbuild::kDontRenderInReflection,
+					       lightbuild::kOnlyRenderInReflection,
+					       (triGet(lp.flags, lightbuild::kDontRenderInReflection,
+					               lightbuild::kOnlyRenderInReflection) + delta + 3) % 3);
+					break;
+
+				case ROW_L_R: case ROW_L_G: case ROW_L_B:
+				{
+					float& c = lp.colour[row - ROW_L_R];
+					c += delta * step;
+					if (c < 0.0f) c = 0.0f;
+					if (c > 1.0f) c = 1.0f;
+					break;
+				}
+				default: return;
+				}
+
+				lights::commit(li);
+				return;
+			}
+
 			if (row == ROW_GROUP)
 			{
 				s_group += delta;
@@ -1753,7 +2404,13 @@ namespace menu
 			    // being re-read, so refreshing one row cannot update another's.
 			    || row == ROW_S_TIMECYCLE   // the Scene page's master switch
 			    || row == ROW_S_WEATHER
-			    || row == ROW_S_BLENDTO;
+			    || row == ROW_S_BLENDTO
+			    // Selecting a different light re-reads every row below it, and
+			    // switching Point/Spot adds or removes the Cone Angle row.
+			    || row == ROW_L_SELECT
+			    || row == ROW_L_SECTION    // swaps the whole block below it
+			    || row == ROW_L_TYPE
+			    || row == ROW_L_SHADOWS;   // reveals Shadow Quality
 		}
 
 		// `b` is pointer-sized so Enhanced's context pointer survives the
@@ -1880,6 +2537,71 @@ namespace menu
 			// because that one is MENU_MARKER and this is MENU_CAMERA, so they
 			// cannot both match - the ordering is for readability, not
 			// correctness.
+			// Scene light actions. Add/Place/Delete all change the SHAPE of the
+			// page, so unlike Apply-to-All they need a full rebuild rather than
+			// just a help-line redraw.
+			if (ours && isLightRow(logicalAt(focus)))
+			{
+				const int lrow = logicalAt(focus);
+				if (navCode == gsig::NAV_ACCEPT)
+				{
+					// Add Light, or accept on the Light cursor while the set is
+					// empty - the same thing, so both go through one helper.
+					if (lrow == ROW_L_ADD ||
+					    (lrow == ROW_L_SELECT && lightCount() == 0))
+					{
+						addLightAtCamera();
+						rebuildShownMenu(focus);
+						return;
+					}
+					if (lrow == ROW_L_PLACE)
+					{
+						const int li = lightIndex();
+						float p[3], d[3];
+						if (li >= 0 && lights::cameraPos(p))
+						{
+							lightbuild::LightParams& lp = lightmodel::Mutable(li).p;
+							lp.pos[0] = p[0]; lp.pos[1] = p[1]; lp.pos[2] = p[2];
+							// A spot also takes the camera's aim, so "place" means
+							// what you see rather than a light pointing at nothing.
+							if (lp.type == lightbuild::kSpot && lights::cameraAim(d))
+							{
+								lp.dir[0] = d[0]; lp.dir[1] = d[1]; lp.dir[2] = d[2];
+							}
+							lights::commit(li);
+						}
+						refreshHelpForFocus();
+						return;
+					}
+					if (lrow == ROW_L_DELETE)
+					{
+						const int li = lightIndex();
+						if (li >= 0)
+						{
+							lightmodel::Remove(li);
+							if (s_light >= lightCount()) s_light = lightCount() - 1;
+							if (s_light < 0) s_light = 0;
+
+							// Every keyframe, not just this one. Filing the
+							// delete against the current keyframe alone leaves
+							// the others still holding that light, and the next
+							// light added takes the freed index and inherits its
+							// animation - a deleted light coming back, moving.
+							//
+							// commitAll rather than SaveAll: writing the ini
+							// directly here bypassed the per-clip store entirely,
+							// so inside the editor the delete was never recorded
+							// anywhere.
+							lightstore::lightRemoved(li);
+							lights::commitAll();
+						}
+						rebuildShownMenu(focus);
+						return;
+					}
+				}
+				// Fall through for left/right: adjust() handles those.
+			}
+
 			if (ours && g_shownKind == MENU_CAMERA &&
 			    logicalAt(focus) == ROW_APPLY_ALL)
 			{
@@ -2029,6 +2751,11 @@ namespace menu
 			origMenuInput(navCode);
 		}
 	}
+
+	// See menu.h. A thin forward so the scene-light track can key against the
+	// same marker every per-marker row here already keys against, rather than
+	// reproducing this build-specific pointer chase a second time.
+	void* currentEditMarker() { return currentMarker(); }
 
 	void install()
 	{

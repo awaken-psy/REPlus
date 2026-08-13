@@ -96,6 +96,33 @@ namespace rfreecam
 		OFF_LookAtOffset   = 0x4A0,   // float[2]: x horizontal, y vertical
 		OFF_AttachEntity   = 0x4C0,
 		OFF_LookAtEntity   = 0x4C8,
+
+		// m_Frame is at +0x20 on any camBaseCamera (pinned twice already - see
+		// the note on rdirector::OFF_FrameFlags), and camFrame puts its Matrix34
+		// at +0x10 and the translation row at +0x40. So the free camera's own
+		// frame block falls out of arithmetic that is already closed:
+		OFF_FrameMatrixA   = 0x30,   // right
+		OFF_FrameMatrixB   = 0x40,   // forward
+		OFF_FrameMatrixC   = 0x50,   // up
+		OFF_FramePosition  = 0x60,
+
+		// The camera's OWN position - the one the stick accumulates onto, and
+		// the reason a teleport has to be written here rather than to the frame.
+		//
+		// Its update reads this, adds the input delta rotated into the frame
+		// basis above, and writes the result to OFF_FramePosition. So writing
+		// only the frame lasts exactly one tick: the next update recomputes it
+		// from this field and the camera springs back.
+		//
+		// Confirmed on BOTH builds in the single caller of UpdateCollision (the
+		// free-cam update): Enhanced 0x2397C0 reads +0x480/+0x484/+0x488 into the
+		// running position, Legacy 0x29CA2C opens with
+		// `MOVSS XMM10, dword ptr [RCX + 0x480]` doing the same.
+		//
+		// WORLD space only while m_AttachEntity is null. When the camera is
+		// attached, the update transforms this through the attach matrix first,
+		// so a world position written here means something else entirely.
+		OFF_Position       = 0x480,
 	};
 
 	inline int32_t markerIndex(const void* cam)

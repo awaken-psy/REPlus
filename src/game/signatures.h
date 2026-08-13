@@ -2663,4 +2663,64 @@ namespace gsig
 		{ 0x32, 0x35, OP_MOVZX_EAX_M16,  3, 0 },   // leg
 	};
 	inline constexpr int VEMENU_ARRAY_COUNT_OFF = 8;
+
+	// -------------------------------------------------------------------------
+	//  Scene lights
+	// -------------------------------------------------------------------------
+	//  Free-standing point/spot lights. Both builds expose the same shape: a
+	//  global growable CLightSource array (data +0, count u16 +8, capacity u16
+	//  +0xA, stride 0x1C0), an AddSceneLight that returns a slot, and a
+	//  per-frame consumer that renders the list and zeroes the count.
+	//
+	//  Enhanced ALSO has a parallel job-based gather. It is deliberately not
+	//  used: it is not dispatched at all when a view has no source lights, so
+	//  anything injected there disappears whenever the camera looks somewhere
+	//  dark. The plain list below behaves identically on both builds.
+	//
+	//  Both patterns below were uniqueness-tested against their whole binary.
+
+	// AddSceneLight() -> CLightSource*
+	//
+	//  Enhanced is a real function that checks count against capacity and grows
+	//  by 0x10; Legacy is a three-instruction thunk that tail-calls the array
+	//  grow. Different shapes, same contract.
+	//
+	//    enh  48 83 EC 28           sub   rsp,0x28
+	//         0F B7 05 ? ? ? ?      movzx eax,word [g_SceneLights.count]
+	//         66 3B 05 ? ? ? ?      cmp   ax,[.capacity]
+	//         75 1B                 jne
+	//         44 0F B7 C0           movzx r8d,ax
+	//         41 8D 50 10           lea   edx,[r8+0x10]      ; grow step
+	//
+	//    leg  48 8D 0D ? ? ? ?      lea   rcx,[g_SceneLights]
+	//         BA 10 00 00 00        mov   edx,0x10           ; grow step
+	//         E9 ? ? ? ?            jmp   atArray::GrowAndAppend
+	inline constexpr Sig LIGHT_ADDSCENELIGHT = {
+		"48 83 EC 28 0F B7 05 ? ? ? ? 66 3B 05 ? ? ? ? 75 1B 44 0F B7 C0 41 8D 50 10",
+		"48 8D 0D ? ? ? ? BA 10 00 00 00 E9"
+	};
+
+	// The per-frame consumer: walks the list, skips type == -1, renders, then
+	// zeroes the count. On Enhanced it is inlined into a larger per-frame render
+	// function, so the pattern keys on that function's head instead; injecting
+	// at its entry still lands well before the loop.
+	inline constexpr Sig LIGHT_CONSUMER = {
+		"56 57 48 83 EC 28 E8 ? ? ? ? E8 ? ? ? ? E8 ? ? ? ? 48 8D 0D",
+		"48 89 5C 24 08 57 48 83 EC 20 33 FF EB 07 33 C9 E8"
+	};
+
+	// g_SceneLights, out of AddSceneLight's own RIP-relative operand rather than
+	// a second pattern — so the array cannot be wrong independently of the
+	// function that hands out slots.
+	//
+	// The two builds land on different fields: Enhanced's movzx reads the COUNT,
+	// Legacy's lea takes the descriptor base. LIGHT_DESC_ADJ corrects for that.
+	inline constexpr unsigned char OP_MOVZX_EAX_W[] = { 0x0F, 0xB7, 0x05 }; // movzx eax,word [rip+d]
+
+	inline constexpr DerivePair LIGHT_SCENELIGHTS = {
+		{ 4, 7, OP_MOVZX_EAX_W, 3 },   // enh -> &count
+		{ 0, 3, OP_LEA_RCX,     3 },   // leg -> &descriptor
+	};
+	inline constexpr int LIGHT_DESC_ADJ_ENH = -8; // count sits at descriptor+8
+	inline constexpr int LIGHT_DESC_ADJ_LEG = 0;
 }

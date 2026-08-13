@@ -14,6 +14,8 @@
 #include "replay/quat.h"
 #include "replay/freecam.h"
 #include "replay/settings.h"
+#include "lights/lightstore.h"
+#include "lights/lights.h"
 #include "replay/shake.h"
 #include "capture/render.h"
 #include "capture/dofsession.h"
@@ -1614,6 +1616,24 @@ namespace smoothblend
 		// Deferred flush of per-marker settings. Cheap: a compare until the
 		// store has actually been quiet for half a second. See rsettings::tick.
 		rsettings::tick();
+
+		// Scene lights follow the same project and clip, for the same reason and
+		// in the same order - swap the set before the flush, so a clip change
+		// cannot let the debounce write the outgoing lights under the incoming
+		// clip.
+		lightstore::syncScope();
+
+		// Carry the grabbed light along with the camera. After syncScope, which
+		// releases the grab on a clip change - moving a light that belongs to
+		// the set we just swapped away from would be worse than not moving one.
+		lights::tickGrab();
+
+		// Then evaluate the light track at the current time. After the grab so
+		// a light being driven wins over its own keyframe, and after syncScope
+		// so the track being evaluated is the one the clip actually has.
+		lightstore::animate();
+
+		lightstore::tick();
 
 		// Same argument, and the same thread requirement: a depth-of-field
 		// session's requests arrive on ReShade's thread but its seeks have to
