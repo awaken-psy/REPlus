@@ -147,6 +147,27 @@ struct FxCaptureBlock
 	// without the aperture it was measured at means nothing.
 	float    dofLiveFocusDelta;
 	float    dofLiveBokeh;
+
+	// --- who owns the clock (v13) ------------------------------------------
+	//
+	// 1 = the ASI is stepping the replay itself between aperture samples, so the
+	// add-on must NOT offset time as well - doing both doubles the exposure. It
+	// shuffles the aperture POINTS instead of the sample times to keep bokeh
+	// radius from tracking time.
+	uint32_t dofExternalTime;
+
+	// addon -> ASI: how many aperture samples this pass will take. The ASI needs
+	// it to size its own time step - shutter divided by this - and it cannot
+	// derive it, because the count follows from the ring geometry we own.
+	uint32_t dofSampleTotal;
+
+	// addon -> ASI: which aperture sample is being taken, 0-based, bumped as
+	// each one lands.
+	//
+	// The ASI steps the clock off CHANGES to this, not off presents. The add-on
+	// takes several presents per sample - its own frame wait - so stepping per
+	// present over-advanced the clip by exactly that ratio, measured at 4x.
+	uint32_t dofSampleIndex;
 };
 #pragma pack(pop)
 
@@ -217,9 +238,21 @@ namespace fxcapture
 	// --- a depth-of-field pass per rendered frame ----------------------------
 	// Ask the add-on to accumulate one frame across the aperture instead of the
 	// renderer accumulating it across time. Returns the request id to wait on.
+	// externalTime = the RENDERER is stepping the replay between aperture
+	// samples, so the add-on must not offset time as well.
 	uint32_t dofRequest(float shutterMs, float bokehSize, int quality,
 	                    bool autofocus, float focusX, float focusY,
-	                    float focusDelta);
+	                    float focusDelta, bool externalTime);
+
+	// How many aperture samples the pass in flight will take, or 0 before the
+	// add-on has published it. The renderer divides the shutter by this to size
+	// its own step, and cannot derive it - the count follows from ring geometry
+	// the add-on owns.
+	uint32_t dofSampleTotal();
+
+	// Which aperture sample the pass is on. Step the clock on CHANGES to this,
+	// never per present - the add-on takes several presents per sample.
+	uint32_t dofSampleIndex();
 
 	// Has that request finished and left its image on screen?
 	bool dofDone(uint32_t seq);

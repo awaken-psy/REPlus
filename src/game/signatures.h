@@ -2664,6 +2664,11 @@ namespace gsig
 	};
 	inline constexpr int VEMENU_ARRAY_COUNT_OFF = 8;
 
+	// How many items the editor's menu column actually draws. Rows past this
+	// are built and stored but never shown, which reads as a broken menu rather
+	// than a full one - the Export row is last, so it is the first to vanish.
+	inline constexpr int VEMENU_COLUMN_ROWS = 16;
+
 	// -------------------------------------------------------------------------
 	//  Scene lights
 	// -------------------------------------------------------------------------

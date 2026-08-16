@@ -93,6 +93,7 @@ namespace exportmenu
 			// Shutter before knowing whether it is exact or approximate is
 			// reading it in the wrong order.
 			ROW_CAPTURE,      // renderCaptureMode
+			ROW_DOF_ON,       // renderDof - the lens, orthogonal to the mode
 			ROW_DOF_SIZE,     // renderDofBokehSize   - DepthOfField mode only
 			ROW_DOF_QUALITY,  // renderDofQuality
 			ROW_DOF_AF,       // renderDofAutofocus
@@ -317,6 +318,7 @@ namespace exportmenu
 			case ROW_OUTPUT:    return "Output";
 			case ROW_FPS:       return "Frame Rate";
 			case ROW_CAPTURE:   return "Capture Mode";
+			case ROW_DOF_ON:    return "IGCS Depth of Field";
 			case ROW_DOF_SIZE:  return "Aperture";
 			case ROW_DOF_QUALITY: return "Bokeh Quality";
 			case ROW_DOF_AF:    return "Autofocus";
@@ -376,8 +378,10 @@ namespace exportmenu
 			case ROW_CAPTURE:
 				// Named the way Render.ini names them, so the row and the key
 				// cannot be mistaken for two different settings.
-				return c.renderCaptureMode == 2 ? "Depth of Field"
-				     : c.renderCaptureMode == 1 ? "Sliding" : "Walking";
+				return c.renderCaptureMode == 1 ? "Sliding" : "Walking";
+
+			case ROW_DOF_ON:
+				return c.renderDof ? "On" : "Off";
 
 			case ROW_SAMPLES:
 				// "Off" would be a lie in Depth of Field mode. The renderer's own
@@ -385,7 +389,7 @@ namespace exportmenu
 				// sample sits at a different moment in the shutter, so a pass
 				// carries motion blur as well as bokeh. The row is greyed because
 				// the NUMBER does nothing, not because the effect is absent.
-				if (c.renderCaptureMode == 2) return "From aperture";
+				if (c.renderDof) return "From aperture";
 				if (c.renderSamples <= 1) return "Off";
 				snprintf(buf, sizeof(buf), "%d samples", c.renderSamples);
 				return buf;
@@ -553,13 +557,31 @@ namespace exportmenu
 					"Sliding plays the clip slowly and exposes consecutive presented "
 					"frames, so all of that keeps simulating. Approximate shutter. Usually "
 					"faster - Walking needs a settle frame per sample too.\n\n"
-					"Depth of Field is Walking with a real lens: the add-on sweeps an "
-					"actual aperture per frame, so defocus comes from geometry. VERY "
-					"EXPENSIVE - tens of seconds a frame, so ONE MINUTE of footage is "
-					"TENS OF HOURS. Samples is ignored; Shutter still sets the exposure.";
+					"IGCS Depth of Field is a separate row and works with either: it "
+					"changes the LENS, not how time is gathered.";
+
+			case ROW_DOF_ON:
+				return "Real optical depth of field, drawn by the ReShade add-on.\n\n"
+					"Every output frame is accumulated across an actual APERTURE - the "
+					"camera is moved over the lens and the results summed - so defocus "
+					"comes from geometry rather than from blurring a finished picture. "
+					"Foreground and background occlude each other correctly and "
+					"highlights bloom into the aperture's own shape.\n\n"
+					"Independent of Capture Mode, which decides only how TIME is "
+					"gathered. Walking gives a frozen instant seen through the lens. "
+					"Sliding steps the clock between aperture samples, so one exposure "
+					"carries both the bokeh and the motion - particles keep moving "
+					"through it, which is what a real lens and shutter do together.\n\n"
+					"Focus is per marker: Rockstar Editor+ > Depth of Field. Aperture "
+					"and quality are the two rows below.\n\n"
+					"Needs the capture add-on and IgcsDof.fx enabled in ReShade. "
+					"Samples is ignored - the aperture does the sampling - while "
+					"Shutter still sets the exposure.\n\n"
+					"VERY EXPENSIVE: tens of seconds a frame, so ONE MINUTE of footage "
+					"is TENS OF HOURS.";
 
 			case ROW_SAMPLES:
-				if (c.renderCaptureMode == 2)
+				if (c.renderDof)
 					return "Not used in Depth of Field mode, and there is still motion "
 					       "blur.\n\n"
 					       "Every sample across the aperture also sits at a different "
@@ -587,7 +609,7 @@ namespace exportmenu
 				       "and has no such floor.";
 
 			case ROW_SHUTTER:
-				if (c.renderCaptureMode == 2)
+				if (c.renderDof)
 					return "How much of each frame interval the shutter is open. In Depth "
 					       "of Field mode this is where the motion blur comes from: the "
 					       "aperture samples are spread across this window.\n\nIt costs no "
@@ -617,7 +639,7 @@ namespace exportmenu
 				       "sample count says. No effect while Motion Blur is Off.";
 
 			case ROW_HIGHLIGHT:
-				if (c.renderCaptureMode == 2)
+				if (c.renderDof)
 					return "Keeps speculars bright through accumulation instead of "
 					       "letting the average wash them down to grey.\n\nIn Depth of "
 					       "Field mode it is applied by the aperture pass rather than by "
@@ -770,18 +792,20 @@ namespace exportmenu
 				break;
 
 			case ROW_CAPTURE:
-				// Three-way now, so it CYCLES rather than picking by sign. Depth
-				// of field is deliberately last: it is the one that turns a
-				// minutes-long render into an hours-long one, and it should not
-				// be what a single nudge past Walking lands on.
-				c.renderCaptureMode = (c.renderCaptureMode + (delta > 0 ? 1 : 2)) % 3;
+				// Two-way again. Depth of field left this enum because it is a
+				// LENS, not a way of gathering time - it has its own row below.
+				c.renderCaptureMode = (delta > 0) ? 1 : 0;
 				// Written as the WORD, not as 0/1: that is what the loader reads
 				// (and it accepts Sliding / Slide / Play), and a Render.ini that
 				// suddenly said "RenderCaptureMode=1" where it used to say
 				// "Sliding" would look like a different key.
 				c.writeRenderStr("RenderCaptureMode",
-					c.renderCaptureMode == 2 ? "DepthOfField" :
 					c.renderCaptureMode == 1 ? "Sliding" : "Walking");
+				break;
+
+			case ROW_DOF_ON:
+				c.renderDof = delta > 0;
+				c.writeRenderBool("RenderDepthOfField", c.renderDof);
 				break;
 
 			case ROW_SAMPLES:
@@ -863,7 +887,16 @@ namespace exportmenu
 		// rows. Colour Channels is what gives way - see below.
 		bool rowVisible(int row)
 		{
-			// The one row dropped to make the lens fit.
+			// The one row dropped to fit the column.
+			//
+			// The column draws SIXTEEN items and stock owns three of them, so twelve
+			// of ours plus three is fifteen - one spare. Anything added here has to
+			// be counted against that, and the guard below says so out loud if it
+			// ever stops fitting.
+			//
+			// Channel order is the one to lose: it is not a per-shot decision, it is
+			// a fix-it you reach for once because a render came out with red and blue
+			// swapped. It is still in Render.ini and in RE+ Render Settings.
 			//
 			// It is the only one here that is not a creative decision: you come
 			// to it because a render came out with red and blue swapped, and
@@ -905,7 +938,7 @@ namespace exportmenu
 			// sampleCount <= 1 branch and writes the frame straight out without
 			// ever reading the value. The depth-of-field pass has its own
 			// highlight controls, in the add-on's panel.
-			if (c.renderCaptureMode == 2)
+			if (c.renderDof)
 			{
 				if (row == ROW_HIGHLIGHT) return false;
 				if (row == ROW_SHUTTER)   return true;
@@ -916,11 +949,11 @@ namespace exportmenu
 
 			// The lens rows only mean anything in Depth of Field mode.
 			if ((row == ROW_DOF_SIZE || row == ROW_DOF_QUALITY || row == ROW_DOF_AF)
-			    && c.renderCaptureMode != 2)
+			    && !c.renderDof)
 				return false;
 
 			// The aperture does the sampling there, and Samples is pinned to 1.
-			if (row == ROW_SAMPLES && c.renderCaptureMode == 2)
+			if (row == ROW_SAMPLES && c.renderDof)
 				return false;
 
 			// A focus point you cannot move is not a setting.
@@ -1072,6 +1105,22 @@ namespace exportmenu
 				if (rowVisible(r)) vis[nvis++] = r;
 
 			const int total = count + nvis;
+
+			// SIXTEEN is what the column draws, and rows past it are allocated,
+			// written and then simply never seen - including Export itself, which is
+			// the last one. That failure looks like the menu being broken rather
+			// than full, so it is worth a loud line rather than a silent clip.
+			//
+			// Not a static_assert: `count` is however many rows the stock screen
+			// happens to have, which is only known here.
+			if (total > gsig::VEMENU_COLUMN_ROWS)
+			{
+				logger::write("info",
+					"exportmenu: %d rows (%d stock + %d ours) exceeds the %d the column "
+					"draws - the last %d will not be visible. Hide one in rowVisible().",
+					total, count, nvis, (int)gsig::VEMENU_COLUMN_ROWS,
+					total - (int)gsig::VEMENU_COLUMN_ROWS);
+			}
 			const size_t bytes = (size_t)total * gsig::VEMENU_OPT_STRIDE;
 
 			// THE GAME'S ALLOCATOR, not the CRT. atArray::Reset() frees this

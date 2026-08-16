@@ -46,7 +46,8 @@ namespace render
 		// 0 = walking (pause + seek per sub-sample), 1 = sliding (play the clip
 		// in slow motion and accumulate whatever is presented). See Config for
 		// why sliding exists and what it costs.
-		int   captureMode  = 0;
+		int   captureMode  = 0;   // 0 Walking (seek), 1 Sliding (step)
+		bool  dof          = false; // the lens, orthogonal to the mode
 
 		// The lens, for captureMode 2. Snapshotted like everything else here so
 		// a render keeps the aperture it started with.

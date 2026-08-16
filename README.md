@@ -573,9 +573,9 @@ the difference is what the world does between them.
 
 | | Sliding *(default)* | Walking |
 |---|---|---|
-| the clip | plays, in slow motion | paused, seeked per sample |
+| the clip | steps forward | paused, seeked per sample |
 | particles, TAA, SSR, RT | keep simulating | reset at every sample |
-| shutter | approximate | exact midpoints |
+| shutter | exact | exact midpoints |
 | frames per output frame | `samples / shutter` | `2·samples + 2` |
 | 64 samples @ 360° | **~1.6 s/frame** | ~4.6 s/frame |
 
@@ -592,11 +592,38 @@ Walking is still the more predictable one: exact shutter placement, deterministi
 frame times, and it fails obviously — a repeated frame rather than a smeared one.
 Reach for it if a sliding render looks wrong, or for short shutters.
 
-The playback speed sliding uses is measured, not configured: it times one frame
-during a warm-up and solves for the speed that makes N samples span the shutter,
-then holds it. The log reports what it settled on.
+Sliding does not ask the game to play slowly and then measure where it landed.
+It drives the replay's own **fixed-time export** stepper — the one Rockstar's
+video export uses — which advances the clip by an exact duration accumulated in
+integer nanoseconds. So the shutter is exact rather than approximate, there is
+no calibration to get wrong, no minimum step to fall under, and nothing that
+depends on your frame rate.
 
 ### Depth of field
+
+Two ways in: as a **render modifier**, which is what you want for a finished
+shot, or as an interactive **session** in ReShade for setting one up.
+
+**As a render modifier**
+
+The **IGCS Depth of Field** row on the Export screen, or `RenderDepthOfField` in
+`Render.ini`. It is a modifier, not a capture mode — it layers onto whichever
+mode is set, and the two combine:
+
+| | what a frame is |
+|---|---|
+| Walking + DoF | the clock is frozen for the whole sweep — depth of field only, no motion blur |
+| Sliding + DoF | the clock steps *between* aperture samples — depth of field **and** motion blur from one sweep |
+
+Sliding + DoF is the interesting one, and it costs nothing over depth of field
+alone: the samples were going to be taken anyway, so spreading them across the
+shutter as well as across the aperture is free. `RenderSamples` is ignored — the
+aperture decides the count — while `RenderShutter` still sets the exposure.
+
+This is the slowest thing here by a wide margin. Every output frame is a whole
+aperture sweep, so a shot measured in minutes elsewhere is measured in hours.
+
+**As a session**
 
 The capture add-on can walk the camera around a lens aperture and blend the
 result — real optical bokeh rather than a screen-space approximation.
@@ -723,9 +750,12 @@ attached. The keys below that have no row are the ones you set once.
 | `EnableRenderer` | 0 | master switch; 0 restores the stock exporter |
 | `RenderMode` | Video | `Video` or `Frames` |
 | `RenderCaptureMode` | Sliding | `Sliding` or `Walking` — see Capture modes above |
+| `RenderDepthOfField` | 0 | render through a real aperture; layers onto either mode |
 | `RenderFps` | 30 | output rate |
 | `RenderSamples` | 64 | motion-blur samples; 1 = none |
-| `RenderShutter` | 1 | shutter angle; 0.5 = 180° |
+| `RenderShutter` | 1 | fraction of the frame interval; 0.5 = 180° |
+| `RenderDofBokehSize` `RenderDofQuality` | 0.15 / 12 | aperture width and ring count |
+| `RenderDofAutofocus` | 1 | measure focus in the world each frame |
 | `RenderJpeg` `RenderQuality` | 0 / 90 | JPEG instead of PNG |
 | `RenderKeepFrames` | 0 | Video mode: keep frames too |
 | `RenderVideoPreset` | | a name from `presets\` |
@@ -746,7 +776,7 @@ RockstarEditorPlus\
     RockstarEditorPlus.ini          camera, shake, limits
     Render.ini                      rendering
     Lights.ini                      default scene lights
-    RE+ Render Settings.exe         editor for both of the above
+    RE+ Render Settings.exe         editor for Render.ini and the presets
     RockstarEditorPlus.log
     ffmpeg.exe                      bundled
     presets\                        codec presets

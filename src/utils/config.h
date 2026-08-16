@@ -532,7 +532,11 @@ struct Config
 			";   Sliding  play the clip in slow motion and expose consecutive presented\n"
 			";            frames. Keeps all of that coherent. Slower, and the shutter is\n"
 			";            approximate. Simulation fidelity over sharpness.\n"
-			"RenderCaptureMode=%s\n\n"
+			"RenderCaptureMode=%s\n"
+			"; The lens, and independent of the mode above. Walking+DoF is a frozen\n"
+			"; instant through a real aperture; Sliding+DoF keeps the world running\n"
+			"; across the exposure. Costs the same either way.\n"
+			"RenderDepthOfField=%d%s; real optical bokeh via the ReShade add-on\n\n"
 			"RenderFps=%g%s; output rate, independent of your actual framerate\n"
 			"RenderSamples=%d%s; sub-frames averaged per output frame. 1 = no blur\n"
 			"RenderShutter=%g%s; 1.0 = 360 degrees, 0.5 = the 180 film convention\n"
@@ -549,8 +553,8 @@ struct Config
 			"; Empty = RockstarEditorPlus\\Captures\\\n"
 			"RenderOutputFolder=%s\n\n",
 			enableRenderer ? 1 : 0,
-			renderCaptureMode == 2 ? "DepthOfField" :
 			renderCaptureMode == 1 ? "Sliding" : "Walking",
+			renderDof ? 1 : 0, "     ",
 			renderFps, "              ", renderSamples, "          ",
 			renderShutter, "          ", renderSettleFrames, "     ",
 			renderSettleSubFrames, "  ", renderHighlight, "   ",
@@ -766,7 +770,17 @@ struct Config
 	// 360-degree ratio at 2. Where walking's second present goes is no mystery
 	// either: one to redraw at the seeked time, one to capture it, and they
 	// cannot overlap without capturing a frame the world has already left.
+	// How sub-frames are gathered IN TIME: 0 Walking (seek), 1 Sliding (step).
+	//
+	// Depth of field used to be a third value here, and that was a category
+	// error: this axis is about time, an aperture is a lens. It is why both
+	// "Samples is ignored in DoF mode" and "DoF is Walking with a real lens"
+	// needed explaining - one enum was carrying two orthogonal things.
 	int   renderCaptureMode  = 1;
+
+	// The lens, orthogonal to the above. Walking+DoF is what "DepthOfField"
+	// used to mean; Sliding+DoF keeps the world simulating through the sweep.
+	bool  renderDof          = false;
 
 	// --- the lens, for DepthOfField capture mode ------------------------------
 	// Only the per-shot decisions live here. The bokeh SHAPE - vertices,
@@ -1262,17 +1276,24 @@ struct Config
 			// which is indistinguishable from the setting having worked.
 			if (m[0])
 			{
-				renderCaptureMode =
-					(_stricmp(m, "Sliding")       == 0 ||
-					 _stricmp(m, "Slide")         == 0 ||
-					 _stricmp(m, "Play")          == 0) ? 1 :
+				// DepthOfField stays a valid word FOREVER, not just for one release:
+				// it means Walking with the lens on, which is exactly what it always
+				// did. Every existing Render.ini keeps working untouched.
+				const bool wasDof =
 					(_stricmp(m, "DepthOfField")   == 0 ||
 					 _stricmp(m, "Depth of Field") == 0 ||
 					 _stricmp(m, "DoF")            == 0 ||
-					 _stricmp(m, "Aperture")       == 0) ? 2 : 0;
+					 _stricmp(m, "Aperture")       == 0);
+				if (wasDof) { renderCaptureMode = 0; renderDof = true; }
+				else renderCaptureMode =
+					(_stricmp(m, "Sliding") == 0 ||
+					 _stricmp(m, "Slide")   == 0 ||
+					 _stricmp(m, "Play")    == 0) ? 1 : 0;
 			}
 		}
 
+		// Read AFTER the word above, so an explicit key wins over the alias.
+		renderDof             = rBool("RenderDepthOfField", renderDof);
 		renderKeepFrames      = rBool("RenderKeepFrames", renderKeepFrames);
 		renderAudio           = rBool("RenderAudio", renderAudio);
 		renderMarkerSpeed     = rBool("RenderMarkerSpeed", renderMarkerSpeed);

@@ -33,7 +33,7 @@ namespace fxcapture
 		// the fields are appended, so an older add-on simply never looks at them
 		// and the capture protocol is unchanged. It is here to be seen in a log
 		// when a pair does turn out to be mismatched.
-		constexpr uint32_t kVersion = 12;
+		constexpr uint32_t kVersion = 14;
 
 		// One place, always, next to the exe. Every render is a numbered
 		// subfolder inside it.
@@ -397,7 +397,7 @@ namespace fxcapture
 
 	uint32_t dofRequest(float shutterMs, float bokehSize, int quality,
 	                    bool autofocus, float focusX, float focusY,
-	                    float focusDelta)
+	                    float focusDelta, bool externalTime)
 	{
 		if (!s_block) return 0;
 
@@ -412,6 +412,11 @@ namespace fxcapture
 		s_block->dofAutofocus = autofocus ? 1u : 0u;
 		s_block->dofFocusX    = focusX;
 		s_block->dofFocusDelta = focusDelta;
+		s_block->dofExternalTime = externalTime ? 1u : 0u;
+		// Cleared with the request, so a stale count from the previous pass cannot
+		// be mistaken for this one's before the add-on has answered.
+		s_block->dofSampleTotal  = 0u;
+		s_block->dofSampleIndex  = 0u;
 		s_block->dofFocusY    = focusY;
 
 		// Never 0 - that value is reserved for "no pass wanted", and is how a
@@ -426,6 +431,16 @@ namespace fxcapture
 	bool dofDone(uint32_t seq)
 	{
 		return s_block && seq != 0 && s_block->dofDoneSeq == seq;
+	}
+
+	uint32_t dofSampleTotal()
+	{
+		return s_block ? s_block->dofSampleTotal : 0u;
+	}
+
+	uint32_t dofSampleIndex()
+	{
+		return s_block ? s_block->dofSampleIndex : 0u;
 	}
 
 	bool liveFocus(float* delta, float* bokeh)

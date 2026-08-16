@@ -77,25 +77,30 @@ static Setting kSettings[] =
   "Frames  - numbered PNG/JPEG sequence with an assemble.txt of ready-made ffmpeg commands. Audio lands as audio.wav beside them, and assemble.txt carries the line that attaches it.\r\n"
   "The capture itself is identical either way.", false, true },
 
-{ "RenderCaptureMode", "Capture mode", S_CHOICE, "Walking|Sliding|Depth of Field",
-  "Sliding - the clip PLAYS in slow motion: it advances to each frame's mark, then exposes Motion blur samples consecutive frames with the world still simulating between them. Particles step, and anything with temporal history (TAA, SSR, ray tracing) stays warm instead of being reset at every sample.\r\n"
+{ "RenderCaptureMode", "Capture mode", S_CHOICE, "Walking|Sliding",
+  "Sliding - the clip PLAYS: it advances to each frame's mark, then exposes Motion blur samples consecutive frames with the world still simulating between them. Particles step, and anything with temporal history (TAA, SSR, ray tracing) stays warm instead of being reset at every sample.\r\n"
   "The default, and about 2x faster than Walking at a 360-degree shutter. Sliding spends one present per sample; Walking spends two - one to redraw at the new time, one to capture it - so it costs 2N+2 presents per frame against sliding's N.\r\n"
   "That edge is shutter-dependent: sliding needs Samples/Shutter presents, so at 0.5 the two are level and below that Walking wins.\r\n"
-  "Walking - pause, seek to each sub-sample, grab, average. Exact shutter placement, deterministic frame times, and a more obvious failure mode: a repeated frame rather than a smeared one. Use it if a sliding render looks wrong, or for short shutters.\r\n"
-  "Depth of Field - Walking with a real lens. The ReShade add-on accumulates each output frame across an actual aperture, so defocus comes from geometry instead of from blurring a finished picture: foreground and background occlude each other correctly, and highlights bloom into the aperture's own shape. Focus is measured in the world and follows the subject through the shot.\r\n"
-  "By far the slowest - every frame is a whole aperture sweep, so a shot measured in minutes elsewhere is measured in HOURS. Motion blur samples is ignored (the aperture does the sampling); Shutter still sets the exposure. Set the bokeh size and shape in ReShade's IGCS Connector panel.", false, true },
+  "Walking - pause, seek to each sub-sample, grab, average. Exact shutter placement, deterministic frame times, and a more obvious failure mode: a repeated frame rather than a smeared one. Use it if a sliding render looks wrong, or for short shutters.\r\n", false, true },
 
-{ "RenderDofBokehSize", "Aperture (DoF mode)", S_FLOAT, nullptr,
+{ "RenderDepthOfField", "IGCS Depth of Field", S_BOOL, nullptr,
+  "Render each frame through a real lens instead of a pinhole. The ReShade add-on accumulates the frame across an actual aperture, so defocus comes from geometry rather than from blurring a finished picture: foreground and background occlude each other correctly, and highlights bloom into the aperture's own shape.\r\n"
+  "A MODIFIER, not a mode - it layers onto whichever capture mode is set above, and the two combine rather than compete:\r\n"
+  "  with Walking  - the clock is frozen for the whole sweep. Depth of field only, no motion blur, and the sharpest possible result.\r\n"
+  "  with Sliding  - the clock steps BETWEEN aperture samples, so one sweep is both the aperture and the exposure. Real depth of field and real motion blur in the same frame, at no extra cost over depth of field alone.\r\n"
+  "By far the slowest thing here either way - every frame is a whole aperture sweep, so a shot measured in minutes elsewhere is measured in HOURS. Motion blur samples is ignored (the aperture does the sampling); Shutter still sets the exposure. Set the bokeh shape in ReShade's IGCS Connector panel.\r\n", false, true },
+
+{ "RenderDofBokehSize", "Aperture (IGCS DoF)", S_FLOAT, nullptr,
   "How wide the lens opens, in world units. The whole creative control: bigger means shallower focus and larger bokeh, and it costs nothing extra to render.\r\n"
   "What it costs is samples. The defocus disc is filled by discrete points, so a wide aperture at low Bokeh quality shows each out-of-focus highlight as a ring of separate dots instead of a smooth circle. Open it up and raise quality together.\r\n"
-  "Only used when Capture mode is Depth of Field. The bokeh SHAPE - vertices, rounding, rotation, aberration, fringe - stays in ReShade's IGCS Connector panel, because it is chosen by looking at a live image.", false },
+  "Only used when IGCS Depth of Field is on. The bokeh SHAPE - vertices, rounding, rotation, aberration, fringe - stays in ReShade's IGCS Connector panel, because it is chosen by looking at a live image.", false },
 
-{ "RenderDofQuality", "Bokeh quality (DoF mode)", S_INT, nullptr,
+{ "RenderDofQuality", "Bokeh quality (IGCS DoF)", S_INT, nullptr,
   "Rings of samples across the aperture. The total sample count grows with it, and so does render time - close to proportionally.\r\n"
   "Set it by the blur you are asking for rather than by taste. A defocused highlight becomes exactly as many dots as there are samples, so a shot with small speculars out of focus needs far more than one without; smooth surfaces converge quickly, bright points are what force the number up.\r\n"
   "12 is a reasonable starting point. 29 is roughly 1200 samples and about a minute per frame.", false },
 
-{ "RenderDofAutofocus", "Autofocus (DoF mode)", S_BOOL, nullptr,
+{ "RenderDofAutofocus", "Autofocus (IGCS DoF)", S_BOOL, nullptr,
   "Measure focus in the world every frame, at the focus point below, so it follows the subject through the shot.\r\n"
   "The measurement is a ray fired into the scene - not a guess from the depth buffer - so it lands on the surface you are actually pointing at. And it is a DEPTH rather than a spot: everything the same distance from the camera comes out sharp too.\r\n"
   "Off leaves focus wherever the add-on's panel last set it.", false },
@@ -127,7 +132,7 @@ static Setting kSettings[] =
   "A FRACTION of the frame interval, not an angle in degrees - the label used to say \"Shutter angle\", which invited entering 180 and produced a 180x exposure that ate the whole clip in a few frames.\r\n"
   "1.0 exposes the whole frame interval (360 degrees). 0.5 is the 180-degree film convention.\r\n"
   "Free in Walking - it only changes how the samples are spaced.\r\n"
-  "In Sliding it also sets the target the playback speed is tuned to, so a shorter shutter means a slower playback and a longer render.", false },
+  "In Sliding it sets how far the clip is stepped between samples, so a shorter shutter packs the same samples into a narrower slice of time.", false },
 
 { "RenderSettleFrames", "Settle frames", S_INT, nullptr,
   "Frames to let the game redraw after seeking to a new output frame. Paid once per frame, so it barely matters at high sample counts "

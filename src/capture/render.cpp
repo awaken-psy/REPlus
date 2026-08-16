@@ -48,6 +48,12 @@ namespace render
 
 		// The depth-of-field pass in flight, if any.
 		uint32_t s_dofSeq     = 0;
+		// The add-on's aperture-sample index as of last present. The clock is
+		// stepped on CHANGES to it, never per present.
+		uint32_t s_dofLastSample = 0;
+		bool     s_dofToldIndex  = false;
+		int      s_dofToldSpan   = 0;
+		float    s_dofClockAtStart = 0.0f;
 		uint32_t s_dofStartMs = 0;
 		int      s_dofRetries = 0;
 
@@ -371,14 +377,43 @@ namespace render
 		using FnPointer = void(__fastcall*)();
 		FnPointer origPointer = nullptr;
 
+		// The OS cursor is a SECOND cursor, and g_CursorVisible has no say over it.
+		//
+		// Two things put it back mid-render: closing the ReShade overlay, which
+		// hands the cursor back the way it found it, and alt-tabbing away and
+		// returning, where the focus change re-shows it. Both were baked into
+		// frames while the game-side flag was still correctly false.
+		int s_cursorPushed = 0;   // decrements we owe back when the render ends
+
+		void osCursorHide()
+		{
+			// ShowCursor is a COUNTER, not a switch - the cursor draws while the
+			// count is >= 0, so a single call loses to anything that pushed it up.
+			// Only push when it is actually showing: pushing unconditionally would
+			// walk a step further negative every frame with no way to give it back.
+			CURSORINFO ci{ sizeof(ci) };
+			if (!GetCursorInfo(&ci) || !(ci.flags & CURSOR_SHOWING)) return;
+			for (int guard = 0; guard < 64 && ShowCursor(FALSE) >= 0; ++guard)
+				++s_cursorPushed;
+			++s_cursorPushed;   // the call that finally took it under zero
+		}
+
+		void osCursorRestore()
+		{
+			while (s_cursorPushed > 0) { ShowCursor(TRUE); --s_cursorPushed; }
+		}
+
 		// Forcing the flag from the pump was not enough: the input code rewrites
 		// it every frame, and our write landed before this function consumed it.
 		// Setting it HERE, at the point of use, is the only ordering that holds -
 		// the same reasoning as suppressing the spinner in its own draw call.
 		void __fastcall hkPointer()
 		{
-			if (capturingFrame() && Config::get().renderHideHud)
-				game::setCursorVisible(false);
+			const bool hide = capturingFrame() && Config::get().renderHideHud;
+			if (hide) game::setCursorVisible(false);
+			// Restores itself the moment the render ends - no extra call site to
+			// forget, and it runs on the window's own thread either way.
+			if (hide) osCursorHide(); else osCursorRestore();
 
 			// The frame pass is started from HERE, not from the render pump.
 			//
@@ -401,6 +436,15 @@ namespace render
 				}
 			}
 			origPointer();
+
+			// Clear it AFTER Update as well.
+			//
+			// Update does not merely consume the flag, it writes it - so clearing
+			// only on the way in left the GAME as the last writer for the rest of
+			// the frame. Any frame where something asked for the cursor back was
+			// then drawn with it, which is one visible frame per event and enough
+			// to ghost into an accumulated exposure.
+			if (hide) game::setCursorVisible(false);
 		}
 
 		void __fastcall hkSpinner(float a, int b, int cc)
@@ -614,6 +658,60 @@ namespace render
 
 		// Clamp a slide speed to something the replay clock can step. Shared by
 		// the calibration and the per-frame controller so they cannot disagree.
+		// Sliding with the lens on: the world keeps simulating across the exposure
+		// instead of being frozen at one instant.
+		//
+		// Needs the engine's stepper - without it we have no way to advance the
+		// clock BETWEEN aperture samples, and the pass degenerates to Walking's
+		// frozen instant. That is a silent difference, so it is logged at start.
+		bool slidingDof()
+		{
+			return s_cfg.dof && s_cfg.captureMode == 1 && s_fxStep;
+		}
+
+		// ONE progress line, whichever mode is running.
+		//
+		// Sliding used to print frames + clip time with no percentage or estimate,
+		// while walking printed percentage + time left. Same event, two shapes, so
+		// two renders could not be compared at a glance and neither could be
+		// grepped for reliably.
+		//
+		// Rate-limited here rather than at each call site, so the interval cannot
+		// drift apart between modes either.
+		void reportProgress(bool force = false)
+		{
+			const uint32_t now = GetTickCount();
+			if (!force && now - s_lastReport < kReportEveryMs) return;
+			s_lastReport = now;
+
+			const float elapsed  = (now - s_startTick) / 1000.0f;
+			const bool  haveRate = s_frame > 0;
+			const float perFrame = haveRate ? elapsed / (float)s_frame : 0.0f;
+
+			if (!haveRate)
+			{
+				logger::write("info",
+					"render: 0/%d frames, %.0fs elapsed - still on the first",
+					s_frames, elapsed);
+			}
+			else if (s_openEnded)
+			{
+				// No total to divide by, so no percentage and no estimate - but the
+				// same words in the same order as the line below it.
+				logger::write("info",
+					"render: %d frames, %.0fs elapsed, %.1fs/frame",
+					s_frame, elapsed, perFrame);
+			}
+			else
+			{
+				logger::write("info",
+					"render: %d/%d frames (%.0f%%), %.0fs elapsed, %.1fs/frame, "
+					"~%.0fs left",
+					s_frame, s_frames, 100.0f * s_frame / (float)s_frames, elapsed,
+					perFrame, perFrame * (float)(s_frames - s_frame));
+			}
+		}
+
 		void slideFloor(float& sp)
 		{
 			float lo = 0.001f;
@@ -1212,6 +1310,7 @@ namespace render
 		s_cfg.highlight    = c.renderHighlight;
 		s_cfg.channelOrder = c.renderChannelOrder;
 		s_cfg.captureMode  = c.renderCaptureMode;
+		s_cfg.dof          = c.renderDof;
 		s_cfg.dofBokehSize = c.renderDofBokehSize;
 		s_cfg.dofQuality   = c.renderDofQuality;
 		s_cfg.dofAutofocus = c.renderDofAutofocus;
@@ -1229,7 +1328,7 @@ namespace render
 		// while sitting on frame 0 for an hour, rewriting frame_000000 with 64
 		// consecutive aperture sweeps of the same instant.
 		static int s_saidSamples = -1;
-		if (s_cfg.captureMode == 2 && s_cfg.samples != 1)
+		if (s_cfg.dof && s_cfg.samples != 1)
 		{
 			// Once per distinct value. applyConfig runs on every menu row change,
 			// and this filled the log with thirty identical lines while someone
@@ -1268,7 +1367,7 @@ namespace render
 	}
 
 	bool active()      { return s_step != Step::Idle; }
-	bool drivingDofPass() { return s_step != Step::Idle && s_cfg.captureMode == 2; }
+	bool drivingDofPass() { return s_step != Step::Idle && s_cfg.dof; }
 	int  frameCount()  { return s_frames; }
 	int  frameDone()   { return s_frame; }
 	const char* outputFolder() { return s_folder; }
@@ -1430,7 +1529,31 @@ namespace render
 			// at the start before anything rolls. From here the engine drives the
 			// clock, including stepping clips on its own, exactly as it does for
 			// the audio pass.
-			if (s_cfg.captureMode == 1)
+			// THE LENS TAKES THE WALKING STATE MACHINE, whichever mode is set.
+			//
+			// A depth-of-field frame is one request to the add-on, waited on and then
+			// captured - Settle -> DofPass -> Ack. Sliding's loop instead exposes
+			// sub-frames itself and never asks for a pass at all, so entering it with
+			// the lens on produced a plain render with the add-on untouched.
+			//
+			// What sliding contributes is the CLOCK: the stepper is begun below so
+			// DofPass can advance time between aperture samples. That is the whole
+			// difference between the two flavours - the state machine is shared.
+			if (s_cfg.dof && s_cfg.captureMode == 1)
+			{
+				// Step 0 for now: the size depends on the add-on's sample count, which
+				// only exists once a pass has been asked for.
+				s_fxStep      = game::fixedTimeBegin(0.0f);
+				s_fxSampleMs  = 0.0f;
+				s_fxGapMs     = 0.0f;
+				logger::write("info",
+					"render: sliding + depth of field - the clock %s between aperture "
+					"samples, so the world keeps moving through each exposure.",
+					s_fxStep ? "steps"
+						: "CANNOT step (no exact stepping on this build), so the "
+						  "world is frozen exactly as it is in walking");
+			}
+			else if (s_cfg.captureMode == 1 && !s_cfg.dof)
 			{
 				// A seed, not a setting. The advance phase of the first frame
 				// measures what one present is worth and solves for the real
@@ -1645,14 +1768,19 @@ namespace render
 		// whether that was walking being slow or sliding being broken - and those
 		// have completely different causes. Reconstructing it from the ini is not
 		// the same thing: the ini is what it says NOW, not what that render ran.
-		const char* const mode = (s_cfg.captureMode == 2) ? "depth of field"
-		                       : (s_cfg.captureMode == 1) ? "sliding" : "walking";
+		// The lens is a MODIFIER now, so the line has to name both axes - which
+		// one gathers time and whether an aperture is involved.
+		const char* const mode =
+			s_cfg.dof ? (s_cfg.captureMode == 1 ? "sliding + depth of field"
+				                                    : "walking + depth of field")
+			          : (s_cfg.captureMode == 1 ? "sliding" : "walking");
 
 		// Said once, up front, because the cost is not guessable from the
 		// settings: every output frame is a whole aperture sweep, so a figure
 		// people expect in minutes lands in hours. Better to see it in the log at
 		// frame 0 than to work it out from the ETA at frame 6.
-		if (s_cfg.captureMode == 2)
+
+		if (s_cfg.dof)
 		{
 			// The lens, stated at the start of the render.
 			//
@@ -1690,7 +1818,7 @@ namespace render
 		// settings as if they applied is how an afternoon gets spent wondering why
 		// changing one made no difference.
 		char blur[96];
-		if (s_cfg.captureMode == 2)
+		if (s_cfg.dof)
 			// NOT "no motion blur", which is what this said and it was wrong: the
 			// aperture samples are spread across the shutter, so a pass carries
 			// blur as well as bokeh. Samples being 1 describes the renderer's own
@@ -2673,15 +2801,7 @@ namespace render
 
 				if (++s_frame >= s_frames) { finish("finished", true); return; }
 
-				const uint32_t now = GetTickCount();
-				if (now - s_lastReport >= kReportEveryMs)
-				{
-					s_lastReport = now;
-					const float elapsed = (now - s_startTick) / 1000.0f;
-					logger::write("info",
-						"render: %d/%d frames, %.0fs elapsed, clip time %.1fs",
-						s_frame, s_frames, elapsed, s_slideTime * 0.001);
-				}
+				reportProgress();
 			}
 
 			if (!game::addr_g_ReplayTimeMs) { finish("aborted - no replay clock", false); return; }
@@ -3214,14 +3334,16 @@ namespace render
 			// above have to have landed first - the pass anchors its shutter on
 			// the clock as it finds it, so starting one mid-seek would sweep the
 			// aperture around the wrong instant.
-			if (s_cfg.captureMode == 2)
+			if (s_cfg.dof)
 			{
 				if (Config::get().splineDebugLog)
 					logger::write("info",
 						"dof-seq: frame %d requesting pass, clock %.1f (settle done)",
 						s_frame, clockNow());
+				s_dofClockAtStart = clockNow();
 				s_dofSeq     = fxcapture::dofRequest(dofShutterMs(), s_cfg.dofBokehSize, s_cfg.dofQuality,
-						dofAutofocusNow(), s_cfg.dofFocusX, s_cfg.dofFocusY, dofFocusDeltaNow());
+						dofAutofocusNow(), s_cfg.dofFocusX, s_cfg.dofFocusY, dofFocusDeltaNow(),
+						slidingDof());
 				s_dofStartMs = GetTickCount();
 				if (s_dofSeq == 0)
 				{
@@ -3246,6 +3368,57 @@ namespace render
 
 		case Step::DofPass:
 		{
+			// SLIDING WITH THE LENS: advance the clock between aperture samples.
+			//
+			// The add-on takes one sample per present and we get one pump per
+			// present, so stepping here puts every sample at both a different point
+			// on the lens and a different instant - which is what a real lens and a
+			// real shutter do at the same time, from one integral.
+			//
+			// The add-on is told not to offset time itself (externalTime), or the
+			// exposure would be applied twice.
+			//
+			// Sized off the add-on's own sample count, which arrives a present or
+			// two after the request - until it does the step stays 0 and the clock
+			// simply holds, which is the correct thing to do while the geometry is
+			// still being built.
+			if (slidingDof())
+			{
+				// ONE STEP PER SAMPLE, not per present.
+				//
+				// The add-on spends several presents on each aperture sample - its own
+				// frame wait - so stepping every present advanced the clip by exactly
+				// that ratio too far. Measured as 4x at a 360-degree shutter and 2x at
+				// 180, i.e. frameWait x shutter, which is the signature of this bug.
+				//
+				// Armed only when the add-on's index MOVES, zero otherwise. That gives
+				// exactly `total` steps of shutter/total - the shutter - however many
+				// presents each sample took, and it stays right if the frame wait is
+				// changed in the panel.
+				const uint32_t total = fxcapture::dofSampleTotal();
+				const uint32_t idx   = fxcapture::dofSampleIndex();
+				const bool     moved = (idx != s_dofLastSample);
+				s_dofLastSample      = idx;
+
+				// Said once per render: if the index never moves, every present looks
+				// like a fresh sample and the over-advance is silent.
+				// `total` guards it as well as `moved`: the controller's step index
+				// starts at -1 and the count is published a present or two after the
+				// request, so the first transition is 0 -> 0xFFFFFFFF with a total of
+				// zero. Harmless - the step is gated on total too - but it printed
+				// "(4294967295 of 0)", which reads as a fault and is not one.
+				if (moved && total && !s_dofToldIndex)
+				{
+					s_dofToldIndex = true;
+					logger::write("info",
+						"render: aperture sample index is live (%u of %u) - stepping once "
+						"per sample", idx, total);
+				}
+
+				game::fixedTimeSetStep((moved && total)
+					? dofShutterMs() / (float)total : 0.0f);
+			}
+
 			if (fxcapture::dofStatus() == 3)
 			{
 				if (++s_dofRetries > kDofMaxRetries)
@@ -3261,9 +3434,28 @@ namespace render
 					"(%d of %d). The add-on's log names the reason.",
 					s_frame, s_dofRetries, kDofMaxRetries);
 				s_dofSeq     = fxcapture::dofRequest(dofShutterMs(), s_cfg.dofBokehSize, s_cfg.dofQuality,
-						dofAutofocusNow(), s_cfg.dofFocusX, s_cfg.dofFocusY, dofFocusDeltaNow());
+						dofAutofocusNow(), s_cfg.dofFocusX, s_cfg.dofFocusY, dofFocusDeltaNow(),
+						slidingDof());
 				s_dofStartMs = GetTickCount();
 				return;
+			}
+
+			// DID THE CLOCK MOVE ACROSS THE SWEEP?
+			//
+			// The whole point of sliding + lens is that the world advances BETWEEN
+			// aperture samples, so a sample sees a slightly later instant than the
+			// one before it. If this span is ~0 the samples are all one instant and
+			// the result is bokeh with no motion blur - which looks identical to
+			// walking, and the frame-to-frame spacing cannot tell the two apart,
+			// because the seek to the next frame supplies that either way.
+			if (fxcapture::dofDone(s_dofSeq) && s_dofToldSpan != s_frame + 1)
+			{
+				s_dofToldSpan = s_frame + 1;
+				const float span = clockNow() - s_dofClockAtStart;
+				logger::write("info",
+					"render: frame %d - the clock moved %.2fms across the sweep, against "
+					"a %.2fms shutter.",
+					s_frame, span, dofShutterMs());
 			}
 
 			if (!fxcapture::dofDone(s_dofSeq))
@@ -3345,45 +3537,21 @@ namespace render
 
 				if (++s_frame >= s_frames) { finish("finished", true); return; }
 
-				// Time-based rather than every Nth frame: at these speeds a
-				// fixed frame interval is either a wall of text or one line
-				// every few minutes, depending on the sample count.
-				const uint32_t now = GetTickCount();
-				if (now - s_lastReport >= kReportEveryMs)
-				{
-					s_lastReport = now;
-					const float elapsed = (now - s_startTick) / 1000.0f;
-
-					// s_frame is 0 until the first frame lands, and at a high
-					// sample count the first frame can easily take longer than the
-					// report interval - so this divided by zero and printed
-					// "inf s/frame, ~infs left" on exactly the renders whose ETA
-					// anyone actually wants. Report elapsed only until there is a
-					// frame to average over.
-					const bool  haveRate = s_frame > 0;
-					const float perFrame = haveRate ? elapsed / (float)s_frame : 0.0f;
-
-					if (!haveRate)
-					{
-						logger::write("info",
-							"render: still on the first frame, %.0fs elapsed", elapsed);
-					}
-					else if (s_openEnded)
-					{
-						logger::write("info",
-							"render: %d frames, %.0fs elapsed (%.1fs/frame)",
-							s_frame, elapsed, perFrame);
-					}
-					else
-					{
-						logger::write("info",
-							"render: %d/%d frames (%.0f%%), %.0fs elapsed, ~%.0fs left",
-							s_frame, s_frames, 100.0f * s_frame / (float)s_frames,
-							elapsed, perFrame * (float)(s_frames - s_frame));
-					}
-				}
+				reportProgress();
 			}
 
+			// Credit the accumulator for what this seek just moved.
+			//
+			// The sweep advanced it by the SHUTTER; this seek advances the clock by a
+			// whole frame. Without the difference the clock ends up ahead of its own
+			// target and the engine's Max(target - current, 0) clamps every later
+			// step to zero - which is why 180 degrees blurred on frame 0 and never
+			// again, while 360, where the two happen to be equal, worked throughout.
+			if (slidingDof())
+			{
+				const float gap = s_dt - dofShutterMs();
+				if (gap > 0.0f) game::fixedTimeSkip(gap);
+			}
 			game::jumpProjectTo(seekTime(), 0);
 
 			// Trace the clock through the whole depth-of-field cycle.
