@@ -577,37 +577,69 @@ namespace rsettings
 			return;
 		}
 
-		std::ofstream out(g_wpath, std::ofstream::out | std::ofstream::trunc);
-		if (!out)
+		// Write a temporary alongside and swap it in, rather than truncating the
+		// real file and writing into the hole.
+		//
+		// Truncating first means ANY failure past that point loses the whole
+		// side-car - every marker in the project, not just the edit being saved.
+		// That is not hypothetical: a parameter added without an entry in
+		// paramName() streamed a null const char*, which sets failbit and turns
+		// every write after it into a no-op, leaving the file empty. The
+		// static_assert there stops that particular cause; this stops the class
+		// of it, a disk filling up mid-write included.
+		const std::wstring tmp = g_wpath + L".tmp";
 		{
-			logger::write("info", "settings: !! could not write %s", g_path.c_str());
-			return;
-		}
-
-		out << kHeader << kVersion << '\n';
-
-		// g_entries is keyed clip-major, so iterating it in order already groups
-		// by clip - the header only has to be emitted when the high half changes.
-		int clip = -1;
-		for (const auto& kv : g_entries)
-		{
-			const MarkerSettings& s = kv.second;
-			if (clipOf(kv.first) != clip)
+			std::ofstream out(tmp, std::ofstream::out | std::ofstream::trunc);
+			if (!out)
 			{
-				clip = clipOf(kv.first);
-				out << "clip " << clip << '\n';
+				logger::write("info", "settings: !! could not write %s", g_path.c_str());
+				return;
 			}
 
-			out << "marker " << timeOf(kv.first);
-			if (s.path   != PathMode::Inherit)   out << " path="   << (int)s.path;
-			if (s.orient != OrientMode::Inherit) out << " orient=" << (int)s.orient;
-			if (s.ourShake)                      out << " shake=1";
-			// Only what is actually set. An inherit is the absence of a field
-			// rather than a -1, which keeps a lightly-edited marker to one short
-			// line instead of a row of two dozen sentinels.
-			for (int i = 0; i < P_COUNT; ++i)
-				if (s.has((Param)i)) out << ' ' << paramName((Param)i) << '=' << s.v[i];
-			out << '\n';
+			out << kHeader << kVersion << '\n';
+
+			// g_entries is keyed clip-major, so iterating it in order already groups
+			// by clip - the header only has to be emitted when the high half changes.
+			int clip = -1;
+			for (const auto& kv : g_entries)
+			{
+				const MarkerSettings& s = kv.second;
+				if (clipOf(kv.first) != clip)
+				{
+					clip = clipOf(kv.first);
+					out << "clip " << clip << '\n';
+				}
+
+				out << "marker " << timeOf(kv.first);
+				if (s.path   != PathMode::Inherit)   out << " path="   << (int)s.path;
+				if (s.orient != OrientMode::Inherit) out << " orient=" << (int)s.orient;
+				if (s.ourShake)                      out << " shake=1";
+				// Only what is actually set. An inherit is the absence of a field
+				// rather than a -1, which keeps a lightly-edited marker to one short
+				// line instead of a row of two dozen sentinels.
+				for (int i = 0; i < P_COUNT; ++i)
+					if (s.has((Param)i)) out << ' ' << paramName((Param)i) << '=' << s.v[i];
+				out << '\n';
+			}
+
+			out.flush();
+			if (!out)
+			{
+				// Leave the previous file standing and stay dirty, so the next tick
+				// tries again instead of the edits quietly evaporating.
+				logger::write("info",
+					"settings: !! write failed for %s - keeping the previous file",
+					g_path.c_str());
+				return;
+			}
+		}
+
+		if (!MoveFileExW(tmp.c_str(), g_wpath.c_str(), MOVEFILE_REPLACE_EXISTING))
+		{
+			logger::write("info",
+				"settings: !! could not replace %s (error %lu) - keeping the previous file",
+				g_path.c_str(), GetLastError());
+			return;
 		}
 
 		clearDirty();

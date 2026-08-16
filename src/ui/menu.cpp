@@ -169,7 +169,7 @@ namespace menu
 		// is a page of its own rather than rows bolted onto Limits because it
 		// is the one group here that changes what the shot LOOKS like rather
 		// than what the camera is allowed to do.
-		enum { PAGE_CLOSED = 0, PAGE_CURVE, PAGE_LIMITS, PAGE_SCENE, PAGE_FOCUS,
+		enum { PAGE_CLOSED = 0, PAGE_CURVE, PAGE_LIMITS, PAGE_SCENE,
 		       PAGE_LIGHTS, PAGE_COUNT };
 		int  g_page         = PAGE_CLOSED;
 		bool g_stockShakeSet = false; // marker has a GAME shake, so the camera
@@ -266,7 +266,7 @@ namespace menu
 		//
 		// That is why "Shake" is two pages rather than one long one: what the
 		// shake IS, then how it reacts to movement.
-		enum Group { GRP_HIDDEN = 0, GRP_SPLINE, GRP_SHAKE, GRP_MOTION,
+		enum Group { GRP_HIDDEN = 0, GRP_SPLINE, GRP_FOCUS, GRP_SHAKE, GRP_MOTION,
 		             GRP_SWAY, GRP_JITTER, GRP_DETAIL, GRP_AXES,
 		             GRP_MAX };
 
@@ -520,7 +520,7 @@ namespace menu
 				/* AX_PITCH  */ { P_AX_PITCH,  0.0f, 2.0f,    2, "",     false },
 				/* AX_ROLL   */ { P_AX_ROLL,   0.0f, 2.0f,    2, "",     false },
 				/* AX_YAW    */ { P_AX_YAW,    0.0f, 2.0f,    2, "",     false },
-				/* DOF_DELTA */ { P_DOF_DELTA, 0.0f, 0.5f,    5, "",     false, 0.01f },
+				/* DOF_DELTA */ { P_DOF_DELTA, 0.0f, 1.0f,    5, "",     false, 0.01f },
 			};
 			if (!isNumeric(row)) return nullptr;
 			const int i = row - ROW_NUM_FIRST;
@@ -578,21 +578,6 @@ namespace menu
 				s_rows[s_shown++] = ROW_G_HEADER;
 				if (g_page == PAGE_CLOSED) return;   // just the one row
 
-				// Per-marker rows on the TOP-LEVEL menu, which the rest of this page
-				// family is not. They sit here rather than in the Camera submenu for a
-				// plain functional reason: those rows only come alive when the marker
-				// has a camera transition, and focus applies to every marker.
-				//
-				// ROW_STEP comes with them, breaking this family's named-choices-only
-				// rule. A focus delta lives around 0.04 and needs five decimals, so
-				// there is nothing to name - it has to be stepped.
-				if (g_page == PAGE_FOCUS)
-				{
-					s_rows[s_shown++] = ROW_DOF_AF;
-					s_rows[s_shown++] = ROW_DOF_DELTA;
-					s_rows[s_shown++] = ROW_STEP;
-					return;
-				}
 				if (g_page == PAGE_LIGHTS)
 				{
 					// Add is always reachable, even with an empty set - otherwise
@@ -729,11 +714,24 @@ namespace menu
 			// our shake preset, so they are unreachable until it is. Without
 			// this you could tune sway and jitter on a marker running the
 			// game's Drunk shake and see nothing happen.
-			if (!g_ourShakeHere && s_group > GRP_SPLINE) s_group = GRP_SPLINE;
+			// Focus sits above the gate on purpose: it applies to every marker, with
+			// or without our shake preset, and with or without a camera transition.
+			if (!g_ourShakeHere && s_group > GRP_FOCUS) s_group = GRP_FOCUS;
 
 			s_rows[s_shown++] = ROW_GROUP;
 			switch (s_group)
 			{
+			// Per-marker focus. It lived on the top-level marker menu, where the
+			// Marker row moves the selection out from under an edit - the values
+			// were written against one marker and read back against another, which
+			// looked exactly like they were not saving. Shake never had the problem
+			// because shake is edited from here, with the marker already entered.
+			case GRP_FOCUS:
+				s_rows[s_shown++] = ROW_DOF_AF;
+				s_rows[s_shown++] = ROW_DOF_DELTA;
+				s_rows[s_shown++] = ROW_STEP;
+				break;
+
 			case GRP_SPLINE:
 				s_rows[s_shown++] = ROW_PATH;
 				s_rows[s_shown++] = ROW_TENSION;
@@ -888,6 +886,7 @@ namespace menu
 				{
 				case GRP_HIDDEN: return "Closed";
 				case GRP_SPLINE: return "Spline";
+				case GRP_FOCUS:  return "Depth of Field";
 				case GRP_SHAKE:  return "Shake";
 				case GRP_MOTION: return "Shake: Motion";
 				case GRP_SWAY:   return "Shake: Sway";
@@ -1056,7 +1055,6 @@ namespace menu
 				return g_page == PAGE_CURVE  ? "Curve"
 				     : g_page == PAGE_LIMITS ? "Limits"
 				     : g_page == PAGE_SCENE  ? "Scene"
-				     : g_page == PAGE_FOCUS  ? "Depth of Field"
 				     : g_page == PAGE_LIGHTS ? "Scene Lights"
 				                             : "Closed";
 			if (row == ROW_G_PATH)
@@ -1250,7 +1248,7 @@ namespace menu
 			case ROW_STOP_STILL:
 				return "Fade the shake out while the camera is parked.";
 			case ROW_DOF_AF:
-				return "Measure focus in the WORLD each frame, at the centre of frame. Off uses Focus Distance instead. Depth-of-field renders only - it does not change the preview.";
+				return "Measure focus in the WORLD each frame, at the centre of frame, so it follows the subject through the shot. On, it overrides Focus Distance and greys it out; Off hands focus back to that row. Depth-of-field renders only - it does not change the preview.";
 			// --- scene lights ---
 			case ROW_L_SELECT:
 				return lightCount() == 0
@@ -1341,7 +1339,7 @@ namespace menu
 				       "than plain ones, so this is off by default.";
 
 			case ROW_DOF_DELTA:
-				return "Manual focus, in the add-on's own disparity units - the number its Focus Delta slider shows. Ignored while Autofocus is On. Interpolated between markers, so two values across a shot give a focus pull.";
+				return "Manual focus, in the add-on's own disparity units - the number its Focus Delta slider shows. 0 is focused at infinity and higher pulls the plane nearer, so the useful range narrows as you open the aperture. Ignored while Autofocus is On. Interpolated between markers, so two values across a shot give a focus pull.";
 
 			case ROW_SWAY_POS:   return "Slow layer: movement, in metres.";
 			case ROW_SWAY_ROT:   return "Slow layer: rotation, in degrees. This is what sells handheld.";
@@ -1477,6 +1475,29 @@ namespace menu
 		// -------------------------------------------------------------------------
 		constexpr unsigned int kOurRestriction = gsig::EDIT_RESTRICTION_CAMERA_BLOCKED;
 
+		// Autofocus as it resolves for the marker being drawn - per-marker if it
+		// sets one, otherwise the Render.ini default.
+		//
+		// Recorded at populate rather than read on demand, because a restriction
+		// is baked into the ADD_COLUMN_ITEM call and rowRestriction() is also
+		// asked from the nav handler, where no marker is in scope. ROW_DOF_AF is
+		// in rowChangesLayout() so toggling it re-populates and this stays true.
+		bool s_dofAutofocusOn = false;
+
+		// Does this marker actually interpolate? Resolved at populate, for the
+		// same reason as above: rowRestriction() is asked from the input handler,
+		// where no marker is in scope.
+		bool s_blendActive = true;
+
+		// The rows that only mean something while the camera is being blended
+		// between markers. ROW_STEP is deliberately absent - it is the shared
+		// adjust-step row and other groups use it.
+		inline bool isSplineRow(int row)
+		{
+			return row == ROW_PATH || row == ROW_TENSION || row == ROW_EASE_IN
+				|| row == ROW_EASE_OUT || row == ROW_ROT;
+		}
+
 		unsigned int rowRestriction(int row)
 		{
 			if (!game::addr_UpdateMenuHelpText) return gsig::EDIT_RESTRICTION_NONE;
@@ -1507,6 +1528,30 @@ namespace menu
 
 			// Blend needs somewhere to blend TO, and the weather rows need the
 			// override to be on at all.
+			// The spline rows have nothing to act on without a blend - the marker
+			// holds a single pose, so a path shape and its easing reach nothing.
+			// The menu itself stays up, because focus and shake are per-marker
+			// settings that apply however the camera gets there.
+			if (isSplineRow(row) && !s_blendActive)
+				return kOurRestriction;
+
+			// Focus Distance is precisely what autofocus overrides, so with it on the
+			// row moves and the focus does not.
+			//
+			// The greyed state settles on the next entry to this page, not on the
+			// keypress. Putting ROW_DOF_AF in rowChangesLayout() to update it live
+			// swapped the row's refresh for a full repopulate driven from the input
+			// handler, and that stopped Autofocus responding at all - the value was
+			// written and saved, the row just never redrew. A stale grey for one
+			// screen entry is the far smaller problem.
+			//
+			// Only this way round. Autofocus is the switch BETWEEN the two, so
+			// greying it whenever a manual distance existed would leave no way back
+			// to automatic - the same reason the Timecycle master row above stays
+			// live while everything under it greys out.
+			if (row == ROW_DOF_DELTA && s_dofAutofocusOn)
+				return kOurRestriction;
+
 			if ((row == ROW_S_BLENDTO || row == ROW_S_BLEND) && !Config::get().overrideWeather)
 				return kOurRestriction;
 			if (row == ROW_S_BLEND && Config::get().weatherBlendTo < 0)
@@ -1724,6 +1769,11 @@ namespace menu
 			if (row == ROW_DOF_AF)
 			{
 				s.v[rsettings::P_DOF_AF] = (delta > 0) ? 1.0f : 0.0f;
+				// Keep the gate in step. rowRestriction() is consulted again on the
+				// NEXT keypress and it reads this, so leaving it at the populate-time
+				// value left Focus Distance genuinely locked after autofocus was
+				// switched off - not merely looking locked.
+				s_dofAutofocusOn = delta > 0;
 				return;
 			}
 			if (row == ROW_PATH)
@@ -2103,10 +2153,18 @@ namespace menu
 				void* marker = currentMarker();
 				if (!marker) return;
 
-				// Mirror where the stock blend rows appear.
 				if (rmarker::camType(marker) != rmarker::CAM_FREE) return;
-				if (rmarker::blendType(marker) == rmarker::BLEND_NONE) return;
 
+				// NOT gated on the marker having a blend.
+				//
+				// This used to mirror where the stock blend rows appear, which meant the
+				// entire RE+ group vanished from this submenu whenever Blend Mode was
+				// None - including the rows that have nothing to do with interpolation.
+				// Focus is per-marker regardless of how the camera gets there, and a
+				// menu that disappears is indistinguishable from one that is broken.
+				// The spline rows simply have nothing to act on without a blend.
+
+				s_blendActive = rmarker::blendType(marker) != rmarker::BLEND_NONE;
 				s = rsettings::get(rmarker::timeMs(marker));
 
 				// Our shake presents as a seventh entry on the game's own Shake
@@ -2117,6 +2175,10 @@ namespace menu
 				// the populate returns - see relabelShakeRow().
 				g_ourShakeHere = s.ourShake;
 			}
+
+			s_dofAutofocusOn = s.has(rsettings::P_DOF_AF)
+				? s.v[rsettings::P_DOF_AF] > 0.5f
+				: Config::get().renderDofAutofocus;
 
 			buildRows();
 			g_firstRow = menuOptionCount();
@@ -2338,6 +2400,30 @@ namespace menu
 		// column: this used to call PopulateCameraMenu unconditionally, which
 		// would rebuild the camera submenu while the user sits in the top-level
 		// one.
+		// Re-apply one row's greyed state in place.
+		//
+		// The restriction is written once, into the ADD_COLUMN_ITEM call, so a row
+		// whose gate changes has no way to hear about it. Rebuilding the column is
+		// what the rest of this file does for that, but driving a repopulate from
+		// the input handler is exactly what stopped Autofocus responding at all.
+		// The dword is sitting in the array the game reads - write it there.
+		void reapplyRestriction(int row)
+		{
+			if (!game::addr_g_MenuOptions || g_firstRow < 0) return;
+			auto* arr = (MenuArray*)game::addr_g_MenuOptions;
+			if (!arr->data) return;
+
+			for (int i = 0; i < s_shown; ++i)
+			{
+				if (s_rows[i] != row) continue;
+				const int idx = g_firstRow + i;
+				if (idx < 0 || idx >= (int)arr->count) return;
+				if (arr->data[idx].id != (unsigned int)gsig::OURS_OPTION_ID) return;
+				arr->data[idx].restriction = rowRestriction(row);
+				return;
+			}
+		}
+
 		void rebuildShownMenu(int focus)
 		{
 			const bool marker = (g_shownKind == MENU_MARKER);
@@ -2661,6 +2747,7 @@ namespace menu
 			if (isToggle && g_shownKind == MENU_CAMERA && focusIsStockShakeRow(focus))
 			{
 				void* marker = currentMarker();
+
 				if (marker)
 				{
 					const int delta = (navCode == gsig::NAV_RIGHT) ? 1 : -1;
@@ -2730,6 +2817,42 @@ namespace menu
 				}
 
 				void* marker = currentMarker();
+
+				// The focus rows are the only PER-MARKER rows on the top-level menu, so
+				// they are the only ones reachable with no marker resolved - and the
+				// swallow below then ate the keypress, leaving a row that would not
+				// move. Fall back to the project-wide default, which is what the row is
+				// already displaying in that state anyway.
+				if (!marker && (row == ROW_DOF_AF || row == ROW_DOF_DELTA))
+				{
+					Config& c = Config::get();
+					if (row == ROW_DOF_AF)
+					{
+						c.renderDofAutofocus = delta > 0;
+						c.writeBool("RenderDofAutofocus", c.renderDofAutofocus);
+					}
+					else
+					{
+						float d = c.renderDofFocusDelta + (float)delta * kStepVals[s_step];
+						if (d < 0.0f) d = 0.0f;
+						if (d > 1.0f) d = 1.0f;
+						c.renderDofFocusDelta = d;
+						c.writeFloat("RenderDofFocusDelta", d);
+					}
+
+					static bool told = false;
+					if (!told)
+					{
+						told = true;
+						logger::write("info", "menu: no marker selected - the focus rows are editing the Render.ini default rather than a keyframe");
+					}
+
+					MarkerSettings shown{};
+					if (rowChangesLayout(row)) rebuildShownMenu(focus);
+					else                       refreshRow(focus, row, shown);
+					return;
+				}
+
 				if (marker)
 				{
 					const float key = rmarker::timeMs(marker);
@@ -2742,6 +2865,10 @@ namespace menu
 					// stock menu does for a value step. Rebuilding the whole
 					// column was re-issuing every Scaleform call in it on every
 					// input repeat, around thirty times a second on a held key.
+					// Autofocus decides whether Focus Distance is live, and that row was
+					// drawn before the switch moved.
+					if (row == ROW_DOF_AF) reapplyRestriction(ROW_DOF_DELTA);
+
 					if (rowChangesLayout(row)) rebuildShownMenu(focus);
 					else                       refreshRow(focus, row, s);
 				}

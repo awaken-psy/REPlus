@@ -607,6 +607,59 @@ namespace smoothblend
 		if (!curr) { s_declineReason = "marker unreadable";
 		             splineDebug("spline: marker %d unreadable", currIdx); return; }
 
+		// --- IGCS focus, per marker ------------------------------------------
+		//
+		// Resolved HERE, ahead of every gate below it.
+		//
+		// It used to sit at the end of this function, which quietly made focus a
+		// passenger of the spline: a marker with no blend returns at the CUT
+		// check just below, so s_focus was never marked valid and the renderer
+		// fell back to the Render.ini default with no sign anything had been
+		// ignored. Focus is a per-marker setting and applies however the camera
+		// gets there - the same reason the menu is no longer gated on the blend.
+		//
+		// It fetches its own next marker rather than reusing the spline's window,
+		// because that window is built from splineable control points and is
+		// empty in exactly the cases this has to keep working.
+		{
+			const Config& cfgF = Config::get();
+			const rsettings::MarkerSettings msF =
+				rsettings::get(rmarker::timeMs(curr));
+			void* nextF = rstorage::tryGetMarker(storage, currIdx + 1);
+
+			const float nowF   = game::addr_g_ReplayTimeMs
+				? *(float*)game::addr_g_ReplayTimeMs : 0.0f;
+			const float tCurrF = rmarker::timeMs(curr);
+			const float tNextF = nextF ? rmarker::timeMs(nextF) : tCurrF;
+
+			const float dCurr = msF.has(rsettings::P_DOF_DELTA)
+				? msF.v[rsettings::P_DOF_DELTA] : cfgF.renderDofFocusDelta;
+
+			// A next marker with nothing set HOLDS focus rather than racking back
+			// to the global - otherwise setting focus on one marker would pull away
+			// from it across the rest of the shot.
+			float dNext = dCurr;
+			if (nextF)
+			{
+				const rsettings::MarkerSettings msN = rsettings::get(tNextF);
+				if (msN.has(rsettings::P_DOF_DELTA))
+					dNext = msN.v[rsettings::P_DOF_DELTA];
+			}
+
+			// Linear on the two markers bounding the shot. A focus pull is a linear
+			// move on the lens; pchip's extra knots would drag a third marker's
+			// focus into a two-marker pull.
+			const float dspan = tNextF - tCurrF;
+			float u = (dspan > 1e-3f) ? (nowF - tCurrF) / dspan : 0.0f;
+			if (!(u > 0.0f)) u = 0.0f;
+			if (u > 1.0f)    u = 1.0f;
+
+			s_focus.delta = dCurr + (dNext - dCurr) * u;
+			s_focus.af    = msF.has(rsettings::P_DOF_AF)
+				? msF.v[rsettings::P_DOF_AF] > 0.5f : cfgF.renderDofAutofocus;
+			s_focus.valid = true;
+		}
+
 		const uint8_t blend = rmarker::blendType(curr);
 		if (blend == rmarker::BLEND_NONE)
 		{
@@ -870,39 +923,6 @@ namespace smoothblend
 			w.have[5] ? rmarker::timeMs(w.m[5]) : tk[3] + (tk[3] - tk[2]),
 		};
 
-		// --- IGCS focus, per marker ------------------------------------------
-		//
-		// Both values inherit the render's own configured ones when a marker has
-		// no override, which is what makes a project with nothing set behave
-		// exactly as it did before per-marker focus existed.
-		{
-			const Config& cfgF = Config::get();
-
-			// The store is keyed by TIME, and `ms` above is already this marker's.
-			const rsettings::MarkerSettings msNext = rsettings::get(tNext);
-
-			const float dCurr = ms.has(rsettings::P_DOF_DELTA)
-				? ms.v[rsettings::P_DOF_DELTA] : cfgF.renderDofFocusDelta;
-			// A next marker with nothing set holds focus rather than pulling back to
-			// the global - otherwise setting focus on ONE marker would rack away from
-			// it across the following shot, which is the opposite of what was asked.
-			const float dNext = msNext.has(rsettings::P_DOF_DELTA)
-				? msNext.v[rsettings::P_DOF_DELTA] : dCurr;
-
-			// Sampled on the two markers bounding the shot and lerped by where the
-			// clock sits between them. A focus pull is a linear move on the lens;
-			// pchip's extra knots would drag a third marker's focus into a
-			// two-marker pull.
-			const float dspan = tNext - tCurr;
-			float u = (dspan > 1e-3f) ? (now - tCurr) / dspan : 0.0f;
-			if (!(u > 0.0f)) u = 0.0f;
-			if (u > 1.0f)    u = 1.0f;
-
-			s_focus.delta = dCurr + (dNext - dCurr) * u;
-			s_focus.af    = ms.has(rsettings::P_DOF_AF)
-				? ms.v[rsettings::P_DOF_AF] > 0.5f : cfgF.renderDofAutofocus;
-			s_focus.valid = true;
-		}
 
 		// =====================================================================
 		//  The clock, remapped through this marker's ease
