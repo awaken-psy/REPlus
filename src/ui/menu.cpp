@@ -1484,10 +1484,10 @@ namespace menu
 		// in rowChangesLayout() so toggling it re-populates and this stays true.
 		bool s_dofAutofocusOn = false;
 
-		// Does this marker actually interpolate? Resolved at populate, for the
-		// same reason as above: rowRestriction() is asked from the input handler,
-		// where no marker is in scope.
-		bool s_blendActive = true;
+		// Can this marker carry a spline at all - free camera AND a blend?
+		// Resolved at populate, for the same reason as above: rowRestriction() is
+		// asked from the input handler, where no marker is in scope.
+		bool s_splineActive = true;
 
 		// The rows that only mean something while the camera is being blended
 		// between markers. ROW_STEP is deliberately absent - it is the shared
@@ -1528,11 +1528,12 @@ namespace menu
 
 			// Blend needs somewhere to blend TO, and the weather rows need the
 			// override to be on at all.
-			// The spline rows have nothing to act on without a blend - the marker
-			// holds a single pose, so a path shape and its easing reach nothing.
-			// The menu itself stays up, because focus and shake are per-marker
-			// settings that apply however the camera gets there.
-			if (isSplineRow(row) && !s_blendActive)
+			// The spline rows have nothing to act on unless the marker is a free
+			// camera being blended: anything else holds a single pose, or a pose the
+			// game owns, so a path shape and its easing reach nothing. The menu
+			// itself stays up, because focus and shake are per-marker settings that
+			// apply however the camera gets there.
+			if (isSplineRow(row) && !s_splineActive)
 				return kOurRestriction;
 
 			// Focus Distance is precisely what autofocus overrides, so with it on the
@@ -2153,8 +2154,6 @@ namespace menu
 				void* marker = currentMarker();
 				if (!marker) return;
 
-				if (rmarker::camType(marker) != rmarker::CAM_FREE) return;
-
 				// NOT gated on the marker having a blend.
 				//
 				// This used to mirror where the stock blend rows appear, which meant the
@@ -2164,7 +2163,10 @@ namespace menu
 				// menu that disappears is indistinguishable from one that is broken.
 				// The spline rows simply have nothing to act on without a blend.
 
-				s_blendActive = rmarker::blendType(marker) != rmarker::BLEND_NONE;
+				// Both reasons a spline cannot happen. The menu still draws either way -
+				// focus and shake are per-marker settings that apply to any camera.
+				s_splineActive = rmarker::camType(marker) == rmarker::CAM_FREE
+					&& rmarker::blendType(marker) != rmarker::BLEND_NONE;
 				s = rsettings::get(rmarker::timeMs(marker));
 
 				// Our shake presents as a seventh entry on the game's own Shake

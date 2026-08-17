@@ -646,13 +646,23 @@ namespace smoothblend
 					dNext = msN.v[rsettings::P_DOF_DELTA];
 			}
 
-			// Linear on the two markers bounding the shot. A focus pull is a linear
-			// move on the lens; pchip's extra knots would drag a third marker's
-			// focus into a two-marker pull.
+			// Sampled on the two markers bounding the shot - pchip's extra knots
+			// would drag a third marker's focus into a two-marker pull.
 			const float dspan = tNextF - tCurrF;
 			float u = (dspan > 1e-3f) ? (nowF - tCurrF) / dspan : 0.0f;
 			if (!(u > 0.0f)) u = 0.0f;
 			if (u > 1.0f)    u = 1.0f;
+
+			// Eased, not linear. A rack that starts and stops instantly reads as a
+			// machine moving the lens; a puller accelerates into it and settles out
+			// of it, and that arrival is most of what makes a pull look intentional.
+			//
+			// Smoothstep, so the focus is stationary at both markers. On a chain
+			// that also means it settles at each one, which is what a rack to a
+			// subject and then on to another should do - and a marker that does not
+			// change focus is untouched by this either way, since the endpoints are
+			// then equal.
+			u = u * u * (3.0f - 2.0f * u);
 
 			s_focus.delta = dCurr + (dNext - dCurr) * u;
 			s_focus.af    = msF.has(rsettings::P_DOF_AF)
