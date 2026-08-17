@@ -168,6 +168,18 @@ struct FxCaptureBlock
 	// takes several presents per sample - its own frame wait - so stepping per
 	// present over-advanced the clip by exactly that ratio, measured at 4x.
 	uint32_t dofSampleIndex;
+
+	// --- copy the session's focus onto the marker (v15) ---------------------
+	//
+	// addon -> ASI: bumped by "Copy to keyframe" in the depth-of-field panel.
+	// The ASI edge-detects a change and writes dofLiveFocusDelta onto the marker
+	// the editor is sitting on, converting from the session's own aperture to the
+	// render aperture first - the delta is a disparity, so the raw number means a
+	// different plane at a different bokeh size.
+	//
+	// A COUNTER, not a flag: a second press is never swallowed, and neither side
+	// has to clear a write the other one made.
+	uint32_t dofCopyRequest;
 };
 #pragma pack(pop)
 
@@ -269,6 +281,13 @@ namespace fxcapture
 	// focuses somewhere else entirely - by exactly the ratio of the two.
 	//
 	// False when no add-on is present or it has never reported an aperture.
+	// True ONCE per press of the panel's "Copy to keyframe" button.
+	//
+	// Edge-detected on a counter, so holding the button does not repeat and a
+	// press is never lost to a frame we did not poll. Pair it with liveFocus()
+	// for the values to copy.
+	bool copyFocusRequested();
+
 	bool liveFocus(float* delta, float* bokeh);
 
 	// Tear any pass down. Idempotent - the end of a render, an abort and a

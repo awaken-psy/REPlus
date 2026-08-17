@@ -14,6 +14,7 @@
 #include "replay/quat.h"
 #include "replay/freecam.h"
 #include "replay/settings.h"
+#include "ui/menu.h"
 #include "lights/lightstore.h"
 #include "lights/lights.h"
 #include "replay/shake.h"
@@ -1646,6 +1647,12 @@ namespace smoothblend
 		// Deferred flush of per-marker settings. Cheap: a compare until the
 		// store has actually been quiet for half a second. See rsettings::tick.
 		rsettings::tick();
+
+		// The add-on's copy-to-keyframe button. Polled here for the same reason
+		// render::pump() is: this detour is the one place we reliably get a
+		// per-frame call on the main thread, and the press arrives through shared
+		// memory rather than through the editor's input.
+		menu::tick();
 
 		// Scene lights follow the same project and clip, for the same reason and
 		// in the same order - swap the set before the flush, so a clip change

@@ -2799,6 +2799,19 @@ namespace render
 
 				}   // end of the speed controller
 
+				// The lens, per frame, as the add-on actually received it.
+				//
+				// The delta is not a constant: it is interpolated between markers, so a
+				// focus pull only shows up frame by frame. And because it is a
+				// DISPARITY it means nothing without the aperture it was measured
+				// against - the pair has to be logged together or neither number can
+				// be checked afterwards.
+				if (s_cfg.dof)
+					logger::write("info",
+						"render: frame %d lens - aperture %.4f, focus delta %.5f, %s",
+						s_frame, s_cfg.dofBokehSize, dofFocusDeltaNow(),
+						dofAutofocusNow() ? "autofocus" : "manual");
+
 				if (++s_frame >= s_frames) { finish("finished", true); return; }
 
 				reportProgress();
@@ -3534,6 +3547,19 @@ namespace render
 					buildPath(done, sizeof(done));
 					videoout::pushFrame(done);
 				}
+
+				// The lens, per frame, as the add-on actually received it.
+				//
+				// The delta is not a constant: it is interpolated between markers, so a
+				// focus pull only shows up frame by frame. And because it is a
+				// DISPARITY it means nothing without the aperture it was measured
+				// against - the pair has to be logged together or neither number can
+				// be checked afterwards.
+				if (s_cfg.dof)
+					logger::write("info",
+						"render: frame %d lens - aperture %.4f, focus delta %.5f, %s",
+						s_frame, s_cfg.dofBokehSize, dofFocusDeltaNow(),
+						dofAutofocusNow() ? "autofocus" : "manual");
 
 				if (++s_frame >= s_frames) { finish("finished", true); return; }
 

@@ -33,7 +33,10 @@ namespace fxcapture
 		// the fields are appended, so an older add-on simply never looks at them
 		// and the capture protocol is unchanged. It is here to be seen in a log
 		// when a pair does turn out to be mismatched.
-		constexpr uint32_t kVersion = 14;
+		constexpr uint32_t kVersion = 15;
+
+		// Last dofCopyRequest we acted on. See init() for why it is seeded.
+		uint32_t s_copySeen = 0;
 
 		// One place, always, next to the exe. Every render is a numbered
 		// subfolder inside it.
@@ -240,6 +243,14 @@ namespace fxcapture
 			s_block->asiModuleHi = (uint32_t)(h >> 32);
 		}
 
+		// Seed the copy counter to whatever is already there.
+		//
+		// The block outlives us - it is named shared memory, and the add-on may
+		// have been running before this ASI attached. Starting the edge detector
+		// at zero would read a leftover count as a fresh button press and stamp a
+		// stale focus onto whatever marker happened to be selected.
+		s_copySeen = s_block->dofCopyRequest;
+
 		s_block->magic   = kMagic;
 		s_block->version = kVersion;
 		if (s_block->quality == 0) s_block->quality = 90;
@@ -441,6 +452,16 @@ namespace fxcapture
 	uint32_t dofSampleIndex()
 	{
 		return s_block ? s_block->dofSampleIndex : 0u;
+	}
+
+	bool copyFocusRequested()
+	{
+		if (!s_block) return false;
+
+		const uint32_t now = s_block->dofCopyRequest;
+		if (now == s_copySeen) return false;
+		s_copySeen = now;
+		return true;
 	}
 
 	bool liveFocus(float* delta, float* bokeh)

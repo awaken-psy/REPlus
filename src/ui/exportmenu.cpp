@@ -770,11 +770,32 @@ namespace exportmenu
 				// Multiplicative steps: aperture is perceived in stops, so a
 				// fixed increment is far too coarse at 0.05 and far too fine
 				// at 5.
+				const float was = c.renderDofBokehSize;
 				float v = c.renderDofBokehSize * (delta > 0 ? 1.25f : 0.8f);
 				if (v < 0.005f) v = 0.005f;
 				if (v > 5.0f)   v = 5.0f;
 				c.renderDofBokehSize = v;
 				c.writeRenderFloat("RenderDofBokehSize", v);
+
+				// Carry the focus with it.
+				//
+				// Focus is stored as the add-on's DISPARITY, not a distance:
+				// maxBokehSize / (2 * Z * tan(hfov/2)). So it is proportional to the
+				// aperture, and opening up without rescaling moves the focal plane
+				// even though nothing about the focus was touched. The add-on does the
+				// same to its own slider when its Max Bokeh Size changes.
+				//
+				// Every marker and the fallback, so a focus pull keeps its shape.
+				if (was > 0.0f)
+				{
+					const float ratio = v / was;
+					rsettings::scaleParam(rsettings::P_DOF_DELTA, ratio);
+					float d = c.renderDofFocusDelta * ratio;
+					if (d < 0.0f) d = 0.0f;
+					if (d > 1.0f) d = 1.0f;
+					c.renderDofFocusDelta = d;
+					c.writeRenderFloat("RenderDofFocusDelta", d);
+				}
 				break;
 			}
 

@@ -158,6 +158,13 @@ namespace rsettings
 	// SetMarkerNonDilatedTimeMs path, or settings orphan at the old timestamp.
 	void rekey(float oldTimeMs, float newTimeMs);
 
+	// Multiply one parameter by a ratio across EVERY marker, in every clip.
+	//
+	// For focus, which is stored as a disparity rather than a distance and so
+	// scales with the aperture. Changing the aperture without this leaves every
+	// focus value pointing somewhere else.
+	void scaleParam(Param p, float ratio);
+
 	// Bind to a project. Loads the side-car from the markers folder.
 	//
 	// One file per project, and entries inside it scoped by CLIP INDEX. Before

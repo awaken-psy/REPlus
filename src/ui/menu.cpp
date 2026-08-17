@@ -10,6 +10,7 @@
 #include "game/signatures.h"
 #include "replay/marker.h"
 #include "replay/settings.h"
+#include "capture/fxcapture.h"
 #include "replay/shake.h"
 #include "lights/lights.h"
 #include "lights/lightmodel.h"
@@ -2426,6 +2427,51 @@ namespace menu
 			}
 		}
 
+		// Take the focus the user just dialled by eye in the add-on's panel and
+		// write it onto the marker the editor is on.
+		//
+		// Driven by the add-on's "Copy to keyframe" button, through the counter in
+		// the shared block - see tick(). There is no menu row for it: the press
+		// belongs next to the focus you are judging by eye, not two menus away.
+		bool copyFocusToMarker(const char** why)
+		{
+			float d = 0.0f, sessionBokeh = 0.0f;
+
+			void* marker = currentMarker();
+			if (!marker)
+			{
+				if (why) *why = "No marker selected - open a marker first.";
+				return false;
+			}
+			if (!fxcapture::liveFocus(&d, &sessionBokeh))
+			{
+				if (why) *why = "No depth-of-field session is publishing a focus. "
+					"Open one in ReShade, focus by eye, then press this.";
+				return false;
+			}
+
+			// Rescale to OUR aperture. The delta is a disparity measured against the
+			// session's own bokeh size, so copying the raw number would move the focal
+			// plane by whatever ratio the two apertures differ by.
+			const float ourBokeh = Config::get().renderDofBokehSize;
+			if (sessionBokeh > 0.0f && ourBokeh > 0.0f) d *= ourBokeh / sessionBokeh;
+			if (d < 0.0f) d = 0.0f;
+			if (d > 1.0f) d = 1.0f;
+
+			const float key = rmarker::timeMs(marker);
+			MarkerSettings ms = rsettings::get(key);
+			ms.v[rsettings::P_DOF_DELTA] = d;
+			// A copied focus is a manual one by definition.
+			ms.v[rsettings::P_DOF_AF]    = 0.0f;
+			rsettings::set(key, ms);
+			s_dofAutofocusOn = false;
+
+			logger::write("info",
+				"menu: copied focus %.5f from the session (its aperture %.4f, ours "
+				"%.4f) onto the marker at %.0fms", d, sessionBokeh, ourBokeh, key);
+			return true;
+		}
+
 		void rebuildShownMenu(int focus)
 		{
 			const bool marker = (g_shownKind == MENU_MARKER);
@@ -2885,6 +2931,22 @@ namespace menu
 	// same marker every per-marker row here already keys against, rather than
 	// reproducing this build-specific pointer chase a second time.
 	void* currentEditMarker() { return currentMarker(); }
+
+	void tick()
+	{
+		// Deliberately does NOT redraw the menu.
+		//
+		// The press comes from ReShade's overlay, so the editor column is not
+		// where the user is looking, and driving a repopulate from a per-frame
+		// path is the same move that stopped the Autofocus row responding once
+		// already. The value is stored; the row shows it on the next populate.
+		if (!fxcapture::copyFocusRequested()) return;
+
+		const char* why = nullptr;
+		if (!copyFocusToMarker(&why))
+			logger::write("info", "menu: copy-to-keyframe ignored - %s",
+				why ? why : "no reason given");
+	}
 
 	void install()
 	{

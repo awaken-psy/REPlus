@@ -14,6 +14,14 @@ namespace menu
 	// spline keeps working off the ini alone.
 	void install();
 
+	// Once per frame, on the game's main thread.
+	//
+	// Only the add-on's "Copy to keyframe" button so far: it bumps a counter in
+	// the shared block and this is what notices. It has to be polled from
+	// outside the menu's input handler, because the press happens in ReShade's
+	// overlay - the editor never sees an input at all.
+	void tick();
+
 	// The marker the editor currently has OPEN - what the per-marker rows edit.
 	// Null outside the editor, or when the addresses behind it did not resolve.
 	//

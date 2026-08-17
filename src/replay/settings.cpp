@@ -230,6 +230,22 @@ namespace rsettings
 		}
 	}
 
+	void scaleParam(Param p, float ratio)
+	{
+		if (p < 0 || p >= P_COUNT || !(ratio > 0.0f) || ratio == 1.0f) return;
+
+		std::lock_guard<std::mutex> lock(g_mutex);
+		bool any = false;
+		for (auto& kv : g_entries)
+		{
+			// has() is >= 0, and scaling an unset -1 would invent an override.
+			if (!kv.second.has(p)) continue;
+			kv.second.v[p] *= ratio;
+			any = true;
+		}
+		if (any) markDirty();
+	}
+
 	void rekey(float oldTimeMs, float newTimeMs)
 	{
 		std::lock_guard<std::mutex> lock(g_mutex);
