@@ -174,6 +174,122 @@ namespace game
 
 	bool clipRange(float& lo, float& hi) { return clipRangeAt(-1, lo, hi); }
 
+	namespace
+	{
+		// The raw half of clipIdentities, kept separate because __try cannot live
+		// in a function that also unwinds C++ objects. Nothing in here allocates.
+		//
+		// Guarded at all because it walks the montage by hand while the engine may
+		// be rebuilding it. Every offset is the engine's own (see signatures.h) and
+		// the bounds come from the montage itself, so a fault should be impossible
+		// - but "should be impossible" in a mod that runs inside somebody else's
+		// render loop is worth one __try.
+		int readClipHashes(uint64_t* out, int max)
+		{
+			__try
+			{
+				void* ctrl = controller();
+				if (!ctrl) return -1;
+
+				uint8_t* montage = *(uint8_t**)((uint8_t*)ctrl + gsig::PBC_MONTAGE);
+				if (!montage) return -1;
+
+				const int n = (int)*(uint16_t*)(montage + gsig::MONTAGE_COUNT);
+				if (n <= 0 || n > max) return -1;
+
+				uint8_t** clips = *(uint8_t***)(montage + gsig::MONTAGE_CLIPS);
+				if (!clips) return -1;
+
+				for (int i = 0; i < n; ++i)
+				{
+					uint8_t* clip = clips[i];
+					if (!clip) return -1;
+
+					// FNV-1a over the clip's RAW FILE NAME, plus how many earlier
+					// clips in this project came from the same recording.
+					//
+					// Not the engine's own ClipUID, deliberately. That field exists
+					// and would be the tidier key, but its offset cannot be read out
+					// of any accessor - GetUID() is inline, so it never became a
+					// function to disassemble - and a persistence key built on a
+					// GUESSED offset is the one kind of wrong that corrupts every
+					// entry at once instead of failing loudly.
+					//
+					// clip+0x08 is what GetCurrentRawClipFileName returns, so it is
+					// the RECORDING's file name, not a display name somebody can
+					// rename. Stable across trims, renames of the montage clip, and
+					// reordering.
+					//
+					// The occurrence counter is what makes it per-CLIP rather than
+					// per-RECORDING: add the same recording to a project twice and
+					// the two entries would otherwise share an identity. Counting
+					// earlier matches separates them and still survives a trim,
+					// which putting the in/out points in the hash would not - and
+					// trimming a clip is ordinary editing, where adding the same
+					// recording twice and then reordering those two is not.
+					uint64_t h = 1469598103934665603ull;
+					const uint8_t* name = clip + gsig::CLIP_NAME;
+					for (int k = 0; k < 64 && name[k]; ++k)
+					{
+						h ^= name[k];
+						h *= 1099511628211ull;
+					}
+
+					int seen = 0;
+					for (int j = 0; j < i; ++j) if (out[j] == h) ++seen;
+					out[i] = h;                    // provisional, for the compare above
+
+					uint64_t id = h;
+					for (int k = 0; k < 8; ++k)    // fold the occurrence in
+					{
+						id ^= (uint64_t)((seen >> (k * 8)) & 0xFF);
+						id *= 1099511628211ull;
+					}
+
+					// BIT 63 IS RESERVED, and clearing it here is what makes that
+					// true rather than merely likely.
+					//
+					// The settings store marks a clip whose identity is not known
+					// yet by setting the top bit, and tells the two apart with that
+					// one test. An FNV-1a hash sets bit 63 about half the time, so
+					// without this mask roughly every other clip would be read back
+					// as "unresolved" and then remapped through the clip list as if
+					// its low bits were an index - silently attaching a project's
+					// settings to the wrong clips, which is the exact failure this
+					// whole change exists to remove.
+					//
+					// 63 bits of hash is not meaningfully weaker than 64 here: the
+					// population is the clips in one project.
+					id &= 0x7FFFFFFFFFFFFFFFull;
+
+					// 0 is the store's "no clip", so it must never be a real
+					// identity either. Astronomically unlikely, one compare to rule
+					// out.
+					out[i] = id ? id : 1ull;
+				}
+				return n;
+			}
+			__except (EXCEPTION_EXECUTE_HANDLER)
+			{
+				return -1;
+			}
+		}
+	}
+
+	bool clipIdentities(std::vector<uint64_t>& out)
+	{
+		out.clear();
+
+		// 512 is far above anything the editor will build - the montage caps a
+		// project well below it - and it keeps the raw read on the stack.
+		uint64_t buf[512];
+		const int n = readClipHashes(buf, (int)(sizeof(buf) / sizeof(buf[0])));
+		if (n <= 0) return false;
+
+		out.assign(buf, buf + n);
+		return true;
+	}
+
 	// Real elapsed output time -> the authored (non-dilated) time to seek to.
 	//
 	// This is the whole of slow-motion support. Marker speed makes the two clocks

@@ -14,7 +14,7 @@
 //  sReplayMarkerInfo is a fixed 0xB8 struct serialised straight into .clip
 //  files - there is nowhere to put our own fields without breaking the format
 //  Rockstar's own loader validates. So settings live in a side-car file, one per
-//  project, keyed inside it by (clip index, the marker's non-dilated time
+//  project, keyed inside it by (clip identity, the marker's non-dilated time
 //  at +0x70).
 //
 //  Why time is half the key: the editor refuses two markers at the same time
@@ -167,15 +167,22 @@ namespace rsettings
 
 	// Bind to a project. Loads the side-car from the markers folder.
 	//
-	// One file per project, and entries inside it scoped by CLIP INDEX. Before
-	// this there was a single shared file keyed by marker time alone, so a
-	// marker at 2000ms in one project inherited whatever a marker at 2000ms in
+	// One file per project, and entries inside it scoped by CLIP IDENTITY.
+	// Before this there was a single shared file keyed by marker time alone, so
+	// a marker at 2000ms in one project inherited whatever a marker at 2000ms in
 	// another had been given - which is the bug this exists to fix.
 	//
-	// Reordering clips within a project still misattributes, because the scope
-	// is the clip's index rather than its identity. Fixing that needs the clip
-	// UID, which is a further offset hunt; reordering is far rarer than the
-	// collision above, so it is a known limitation rather than a blocker.
+	// Scoping was by clip INDEX until v7, and that misattributed the moment a
+	// project was edited: delete clip 2 of 5 and clips 3, 4 and 5 each shift down
+	// one, so every marker in them inherits the settings of the clip that used to
+	// occupy the slot. Five clips, delete one, four break. Identity does not move
+	// when a neighbour is removed.
+	//
+	// The identity is game::clipIdentities() - the recording's file name plus how
+	// many earlier clips came from that same recording. It survives deleting,
+	// reordering, trimming and renaming; it is only confused by reordering two
+	// clips cut from the SAME recording, which nothing else here can distinguish
+	// either.
 	void bindProject(const char* projectName);
 
 	// Per-frame. Notices when the open project or the edited clip changes and

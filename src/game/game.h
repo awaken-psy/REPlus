@@ -7,6 +7,7 @@
 
 #pragma once
 #include <cstdint>
+#include <vector>
 
 // Resolved retail addresses. 0 == unresolved; the hook is simply not installed
 // and the game keeps its stock behaviour.
@@ -300,6 +301,14 @@ namespace game
 	// need to keep it. Used to scope per-marker settings so two projects stop
 	// sharing one side-car file.
 	const char* projectName();
+
+	// A stable identity for every clip in the open project, in clip order.
+	//
+	// False when the montage cannot be read - during a load, a transition, or
+	// with no project open. FALSE IS NOT "no clips": callers that delete things
+	// have to treat it as "ask again later", or a transient wipes the project's
+	// settings.
+	bool clipIdentities(std::vector<uint64_t>& out);
 
 	// True when every menu address above resolved.
 	bool menuReady();

@@ -431,11 +431,13 @@ They are scoped to the **project and clip** you set them in.
 `markers\<project>.txt` holds one project, with its clips as sections inside:
 
 ```
-RockstarEditorPlus v6
-clip 0
+RockstarEditorPlus v7
+seen 1755530000
+clips 2
+clip 4a1f9c2e7b0d3856
 marker 7138 shake=1 intensity=1.35 freqMul=0.15
 marker 7968 shake=1 intensity=1.35
-clip 1
+clip 0e83b5d1a2c4f760
 marker 0 orient=2
 ```
 
@@ -443,8 +445,31 @@ Fields are named and only written when set, so the file stays readable and a
 lightly-edited marker is one short line. Plain text, safe to hand-edit if a
 project needs rescuing.
 
-> Scoping is by clip *index*, so reordering a project's clips carries the
-> settings with the slot rather than with the clip.
+**Clips are identified, not numbered.** The `clip` line is the clip's identity —
+the recording it came from, plus which use of that recording it is. That is what
+makes editing a project safe:
+
+| you do this | settings |
+|---|---|
+| delete a clip | its settings go with it, the others are untouched |
+| reorder clips | follow their clips |
+| trim a clip | stay with it |
+| rename a clip | stay with it |
+| add the same recording twice | the two get separate settings |
+
+Scoping was by clip *index* before v7, and that broke on exactly the common case:
+delete clip 2 of 5 and clips 3, 4 and 5 shift down a slot, so every marker in
+them inherits the settings of the clip that used to sit there. One deletion, four
+broken clips.
+
+A v6 file is converted the first time its project is opened under a build that
+reads identities. If it refers to a clip the project no longer has, it cannot be
+matched and is copied to `<project>.txt.orphan` rather than being deleted — the
+log says so, and the values are still in that file if you want them back.
+
+> The one case identity cannot separate is reordering two clips cut from the
+> **same recording** with nothing else to tell them apart. Nothing available to
+> the mod distinguishes those, so they are matched in order.
 
 ---
 
@@ -1042,6 +1067,8 @@ you can change it. Delete the ini to have a current one written.
 | Flags and ropes whip far too fast in the render | Sliding renders cloth once per sample instead of once per frame, so 64 samples means roughly 64× the speed. Engine limitation, no setting fixes it — see [Cloth and other live physics](#cloth-and-other-live-physics) |
 | Flags and ropes completely still in the render | Walking pauses the replay, and live cloth never integrates while it is paused. The other half of the same limitation |
 | Colours wrong in the render, fine on screen | Fixed in this build, with nothing to set. The add-on used to ask ReShade for the finished frame, and ReShade hands the channels back in a different order depending on its own version, so on some installs red and blue arrived swapped. It copies the back buffer itself now and reads the order from the buffer's own description. `RenderChannelOrder` and the **Colour Channels** row are gone |
+| Multi-clip render stops after the first clip | The project's clip table read as empty, so multi-clip stepping never armed and the render ended where clip one did. It happens when the project was not fully loaded for playback — open it in the editor first, then Export. The log says so outright, with the clip count it actually read |
+| A render ended early for no obvious reason | Every finish now logs the replay mode it stopped in. `EDIT` is normal; `LOADCLIP` means it stopped during a clip transition, which is worth reporting with the log |
 | Got frames, expected video | `RenderMode=Frames`, or ffmpeg not found — the log says which |
 | A shake setting does nothing | Per-marker values override the ini and always win. If the menu shows a number rather than `Default`, that marker has its own. `ShakeDebugLog=1` logs what reached the camera |
 | Shake looks frozen | The playhead is paused. Play or scrub |

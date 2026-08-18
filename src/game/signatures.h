@@ -1685,6 +1685,31 @@ namespace gsig
 	inline constexpr int PBC_MONTAGE   = 0x08;  // CMontage*, null with no project
 	inline constexpr int PBC_CLIPINDEX = 0x10;  // s32, -1 when there is no clip
 
+	// Inside the montage, and inside a clip. Every one of these was read out of
+	// the engine's own accessors rather than guessed, and they are identical in
+	// both builds:
+	//
+	//     GetCurrentRawClipFileName():
+	//         montage = this->montage            ; +0x08
+	//         if (!montage || clipIndex < 0) return 0
+	//         if (clipIndex >= *(u16*)(montage + 8)) return 0
+	//         clip = (*(CClip***)(montage + 0))[clipIndex]
+	//         return clip + 8                    ; the name buffer IS the return
+	//
+	// CMontage's first member is atArray<CClip*> m_aClips, and a RAGE atArray is
+	// {T* elements; u16 count; u16 capacity} - which is exactly the shape above.
+	inline constexpr int MONTAGE_CLIPS = 0x00;  // CClip** - the atArray's elements
+	inline constexpr int MONTAGE_COUNT = 0x08;  // u16 - the atArray's count
+	inline constexpr int CLIP_NAME     = 0x08;  // char[] - CClip::m_szName
+
+	// NOT USED, and the note is the point. CClip::m_ownerId sits at +0x110 and
+	// GetCurrentRawClipOwnerId returns it, which makes it look like the obvious
+	// per-clip key. It is not: it is the SOCIAL CLUB ACCOUNT that recorded the
+	// footage, so every clip a single player records carries the same value.
+	// Keying anything per-clip on it would collapse a whole project into one
+	// bucket.
+	inline constexpr int CLIP_OWNERID  = 0x110; // u64 - the recording account
+
 	inline constexpr int PBC_VT_GETCLIPINDEX = 0x50;
 	inline constexpr int PBC_VT_GETCLIPCOUNT = 0x58;
 	inline constexpr int PBC_VT_JUMPTOCLIP   = 0x130;

@@ -19,6 +19,9 @@
 #include <cstring>
 #include <cstdlib>
 #include <cmath>
+#include <ctime>
+#include <vector>
+#include <algorithm>
 
 namespace rsettings
 {
@@ -28,20 +31,67 @@ namespace rsettings
 		// Quantising to an integer key avoids float-equality lookups failing on
 		// a 1-ulp difference between what we stored and what we read back.
 		//
-		// The CLIP INDEX is folded into the high half, so two clips in one
-		// project stop sharing entries just because their markers happen to sit
-		// at the same time. The file itself is per project - between the two,
-		// the old "everything in one file keyed by time" collision is gone.
-		using Key = int64_t;
-		inline Key keyOf(int clip, float timeMs)
+		// Scoped by the clip's IDENTITY rather than its index. Index scoping was
+		// the previous shape and it misattributed the moment a project was
+		// edited: delete clip 2 of 5 and clips 3, 4 and 5 all shift down one, so
+		// every one of their markers inherits the settings of the clip that used
+		// to sit there. Five clips, delete one, four break - which is exactly the
+		// report this replaces. Identity does not move when its neighbours do.
+		//
+		// A std::pair orders clip-major then time, which is what lets save()
+		// emit one `clip` header per group by walking the map in order.
+		using Key = std::pair<uint64_t, int32_t>;
+		inline Key keyOf(uint64_t clip, float timeMs)
 		{
-			return ((Key)(uint32_t)clip << 32) | (uint32_t)llroundf(timeMs);
+			return Key(clip, (int32_t)llroundf(timeMs));
 		}
-		inline int  clipOf(Key k)   { return (int)(uint32_t)((uint64_t)k >> 32); }
-		inline long timeOf(Key k)   { return (long)(uint32_t)(uint64_t)k; }
+		inline uint64_t clipOf(const Key& k) { return k.first; }
+		inline long     timeOf(const Key& k) { return (long)k.second; }
 
-		// Which clip lookups are scoped to. Maintained by syncScope().
-		int g_clip = 0;
+		// A clip whose real identity is not known yet, keyed by index instead.
+		//
+		// The high bit is the marker, and game::clipIdentities() MASKS BIT 63 OFF
+		// every identity it produces so the two spaces cannot overlap. That is a
+		// contract between the two files, not a probability: an FNV-1a hash sets
+		// bit 63 about half the time, so without the mask half of all real clips
+		// would read back as unresolved and be remapped through the clip list as
+		// though their low bits were an index.
+		//
+		// Two things depend on telling them apart: the reconciler, which must
+		// never reap a clip merely because it has not been identified yet, and the
+		// migration, which is looking for exactly these.
+		constexpr uint64_t kUnresolvedBit = 0x8000000000000000ull;
+		inline uint64_t unresolvedId(int index)
+		{
+			return kUnresolvedBit | (uint64_t)(uint32_t)index;
+		}
+		inline bool isUnresolved(uint64_t id) { return (id & kUnresolvedBit) != 0; }
+
+		// Which clip lookups are scoped to. Maintained by syncScope(). Starts
+		// unresolved-index-0, which is what a freshly opened project is until the
+		// montage can be read.
+		uint64_t g_clipId = unresolvedId(0);
+
+		// Whether the clip list has been read successfully at least once for the
+		// CURRENT project. Everything that DELETES is gated on it.
+		//
+		// At namespace scope, not a static inside syncScope(), and that is the
+		// whole point: as a function-local it survived a project switch, so the
+		// first read of the NEXT project was treated as a confirmation and could
+		// reap immediately. bindProject clears it.
+		bool g_everResolved = false;
+
+		// The previous read's clip list. Reaping requires this read to AGREE with
+		// it, not merely to be the second one.
+		//
+		// "Second read" is not enough on its own: a montage is populated over
+		// several frames, so reads one and two can both be short and both be
+		// wrong, and reaping against either deletes the settings of every clip
+		// that had not been added yet. Two identical reads a second apart is
+		// evidence the list has settled. A project genuinely being edited fails
+		// this check once and passes on the next pass, which costs a second and
+		// removes the whole class of "a hitch ate my settings".
+		std::vector<uint64_t> g_lastLive;
 
 		std::map<Key, MarkerSettings> g_entries;
 
@@ -80,7 +130,20 @@ namespace rsettings
 		// positional block and immune to the reordering problem that left
 		// P_UNUSED_SINE stuck as a permanent hole.
 		constexpr const char* kHeader  = "RockstarEditorPlus v";
-		constexpr int         kVersion = 6;
+		constexpr int         kVersion = 7;
+
+		// Written on every save and never read by the mod itself. It exists so
+		// that a side-car for a project that no longer exists can be identified
+		// as stale - we cannot enumerate the game's projects, so "when was this
+		// last opened" is the only evidence available. Reported, never acted on
+		// automatically: a project you have not touched in a year is not a
+		// project you deleted.
+		unsigned long long g_lastSeen = 0;
+
+		// How many clips the project held when this was last written. v6 had no
+		// equivalent, which is why migrating one cannot verify its own mapping;
+		// recording it means the next format change will not have that problem.
+		int g_clipCount = 0;
 
 		// The flag and its timestamp are ONE piece of state and must move
 		// together. tick() debounces on the timestamp, so a g_dirty raised
@@ -211,14 +274,14 @@ namespace rsettings
 	MarkerSettings get(float timeMs)
 	{
 		std::lock_guard<std::mutex> lock(g_mutex);
-		auto it = g_entries.find(keyOf(g_clip, timeMs));
+		auto it = g_entries.find(keyOf(g_clipId, timeMs));
 		return it == g_entries.end() ? MarkerSettings{} : it->second;
 	}
 
 	void set(float timeMs, const MarkerSettings& s)
 	{
 		std::lock_guard<std::mutex> lock(g_mutex);
-		const Key k = keyOf(g_clip, timeMs);
+		const Key k = keyOf(g_clipId, timeMs);
 		if (s.isDefault())
 		{
 			if (g_entries.erase(k)) markDirty();
@@ -249,7 +312,7 @@ namespace rsettings
 	void rekey(float oldTimeMs, float newTimeMs)
 	{
 		std::lock_guard<std::mutex> lock(g_mutex);
-		const Key from = keyOf(g_clip, oldTimeMs), to = keyOf(g_clip, newTimeMs);
+		const Key from = keyOf(g_clipId, oldTimeMs), to = keyOf(g_clipId, newTimeMs);
 		if (from == to) return;
 
 		auto it = g_entries.find(from);
@@ -279,7 +342,15 @@ namespace rsettings
 		// this on the next frame if it did not; without the reset, a switch that
 		// happens while clipIndex() is briefly -1 would leave lookups scoped to
 		// a clip of the OUTGOING project.
-		g_clip = 0;
+		//
+		// Unresolved rather than a real identity: the montage is usually still
+		// loading at this point, so nothing can be identified yet. syncScope()
+		// promotes it as soon as the clip list can be read.
+		g_clipId        = unresolvedId(0);
+		g_lastSeen      = 0;
+		g_clipCount     = 0;
+		g_everResolved  = false;
+		g_lastLive.clear();
 
 		if (!projectName || !*projectName) { g_path.clear(); g_wpath.clear(); return; }
 
@@ -427,7 +498,7 @@ namespace rsettings
 				int sh = 0;
 				if (ls >> sh) s.ourShake = sh != 0;
 
-				g_entries[keyOf(0, (float)t)] = s;
+				g_entries[keyOf(unresolvedId(0), (float)t)] = s;
 			}
 
 			// Rewrite in the current format on the next flush, so the file stops
@@ -436,19 +507,39 @@ namespace rsettings
 		}
 		else
 		{
-			// v6+: `clip <n>` scopes the `marker` lines that follow it.
+			// v6+: `clip <scope>` scopes the `marker` lines that follow it.
+			//
+			// v6 wrote a decimal clip INDEX there; v7 writes a 16-digit hex clip
+			// IDENTITY. They are told apart by the version, not by the shape of
+			// the token - a v6 index of 10 and a v7 identity are both "10" to a
+			// hex reader, and guessing would silently mis-scope an entire file.
+			//
+			// A v6 index becomes an UNRESOLVED id, which is the migration's
+			// input: syncScope() converts them to real identities once the clip
+			// list can be read, and never before.
 			//
 			// An unrecognised key is skipped rather than failing the line, and
 			// an unrecognised LINE is skipped rather than failing the file, so a
 			// side-car written by a future build still loads what it can here.
-			int clip = 0;
+			uint64_t clip = unresolvedId(0);
 			while (std::getline(in, line))
 			{
 				std::istringstream ls(line);
 				std::string what;
 				if (!(ls >> what)) continue;
 
-				if (what == "clip") { ls >> clip; continue; }
+				if (what == "clip")
+				{
+					std::string scope;
+					if (!(ls >> scope)) continue;
+					if (ver >= 7)
+						clip = strtoull(scope.c_str(), nullptr, 16);
+					else
+						clip = unresolvedId(atoi(scope.c_str()));
+					continue;
+				}
+				if (what == "seen")  { ls >> g_lastSeen;  continue; }
+				if (what == "clips") { ls >> g_clipCount; continue; }
 				if (what != "marker") continue;
 
 				long long t;
@@ -539,11 +630,150 @@ namespace rsettings
 
 		// -1 is "not in the editor". Same argument: keep the last real scope.
 		const int clip = game::clipIndex();
-		if (clip >= 0 && clip != g_clip)
+		if (clip < 0) return;
+
+		// Re-read the clip list when the edited clip changes, and once a second
+		// otherwise.
+		//
+		// The periodic read is what notices an EDIT. Deleting a clip does not
+		// have to change the index - delete clip 3 while sitting on clip 3 and
+		// the index is still 3, pointing at what used to be clip 4 - so keying
+		// off the index alone would keep writing into the wrong scope until the
+		// user happened to move. A montage walk is a handful of pointer reads and
+		// this is the only thing that costs anything here, so once a second is
+		// both cheap and soon enough to matter.
+		static int sinceRead = 0;
+		static int lastClip  = -1;
+
+		// A bind resets the guard, and that is also the signal to re-read at once
+		// rather than waiting out the timer on a project we know nothing about.
+		if (!g_everResolved) { sinceRead = 60; lastClip = -1; }
+
+		const bool due = (clip != lastClip) || (++sinceRead >= 60);
+		lastClip = clip;
+		if (!due)
 		{
+			// Scope still has to follow the index while unresolved, or a project
+			// whose montage never becomes readable stops distinguishing clips.
 			std::lock_guard<std::mutex> lock(g_mutex);
-			g_clip = clip;
+			if (isUnresolved(g_clipId)) g_clipId = unresolvedId(clip);
+			return;
 		}
+		sinceRead = 0;
+
+		std::vector<uint64_t> live;
+		if (!game::clipIdentities(live))
+		{
+			// COULD NOT READ. Not "there are no clips" - a load, a transition, or
+			// the editor closing all land here, and every one of them is
+			// temporary. Keep the last scope and change nothing else; reaping on
+			// this would empty a project's settings for a streaming hitch.
+			std::lock_guard<std::mutex> lock(g_mutex);
+			if (isUnresolved(g_clipId)) g_clipId = unresolvedId(clip);
+			return;
+		}
+
+		std::lock_guard<std::mutex> lock(g_mutex);
+
+		// ---- migrate a side-car written when scoping was by index -------------
+		//
+		// Index-scoped entries arrive as unresolved ids and are converted here,
+		// once, against the live clip list. The test for whether that conversion
+		// is safe is stated at the branch below.
+		bool anyUnresolved = false;
+		int  maxIndex      = -1;
+		for (const auto& kv : g_entries)
+			if (isUnresolved(clipOf(kv.first)))
+			{
+				anyUnresolved = true;
+				const int i = (int)(uint32_t)clipOf(kv.first);
+				if (i > maxIndex) maxIndex = i;
+			}
+
+		if (anyUnresolved)
+		{
+			// IN RANGE, not "exactly as many as the project has".
+			//
+			// The first version of this demanded maxIndex + 1 == live.size(), which
+			// looks like a validity check and is not: maxIndex is the highest clip
+			// that HAS settings, not how many clips the project had. A perfectly
+			// good file with one tweaked marker on clip 0 reports maxIndex 0, so a
+			// five-clip project orphaned it every time.
+			//
+			// v6 does not record the clip count, so an intact mapping genuinely
+			// cannot be distinguished from one that predates a deletion. Being
+			// permissive keeps whatever association the file already had - which is
+			// what the user has been looking at - rather than discarding it on a
+			// suspicion. Out of range is different: that file cannot be applied at
+			// all, so it is set aside. v7 writes the count so this stops being a
+			// judgement call.
+			if (maxIndex >= 0 && (size_t)maxIndex < live.size())
+			{
+				std::map<Key, MarkerSettings> moved;
+				for (auto& kv : g_entries)
+				{
+					const uint64_t c = clipOf(kv.first);
+					const uint64_t id = isUnresolved(c)
+						? live[(size_t)(uint32_t)c] : c;
+					moved[Key(id, kv.first.second)] = kv.second;
+				}
+				g_entries.swap(moved);
+				markDirty();
+				logger::write("info",
+					"settings: migrated %d marker override(s) from clip-index scoping "
+					"to clip identity. If this project had a clip DELETED under an "
+					"older build, check the markers still carry the values you expect "
+					"- index scoping could not survive that, which is why it changed.",
+					(int)g_entries.size());
+			}
+			else
+			{
+				// Set aside, never deleted. The user may want to recover values by
+				// hand, and this is the only copy of them.
+				const std::wstring aside = g_wpath + L".orphan";
+				CopyFileW(g_wpath.c_str(), aside.c_str(), FALSE);
+				g_entries.clear();
+				markDirty();
+				logger::write("info",
+					"settings: !! this project's side-car refers to clip %d and the "
+					"project only holds %d, so its per-marker settings can no "
+					"longer be matched to clips. It has been copied to '%s.orphan' and "
+					"this project starts clean - the values are still in that file if "
+					"you want them back.",
+					maxIndex + 1, (int)live.size(), g_path.c_str());
+			}
+		}
+
+		// ---- drop entries for clips that are no longer in the project ---------
+		//
+		// Requires a previous read that AGREES with this one. See g_lastLive for
+		// why "not the first read" was not a strong enough guard.
+		const bool settled = g_everResolved && g_lastLive == live;
+		g_lastLive = live;
+
+		if (settled && !g_entries.empty())
+		{
+			size_t before = g_entries.size();
+			for (auto it = g_entries.begin(); it != g_entries.end(); )
+			{
+				const uint64_t c = clipOf(it->first);
+				const bool alive = isUnresolved(c) ||
+					std::find(live.begin(), live.end(), c) != live.end();
+				it = alive ? std::next(it) : g_entries.erase(it);
+			}
+			if (g_entries.size() != before)
+			{
+				markDirty();
+				logger::write("info",
+					"settings: dropped %d marker override(s) belonging to clip(s) no "
+					"longer in this project",
+					(int)(before - g_entries.size()));
+			}
+		}
+		g_everResolved = true;
+
+		g_clipCount = (int)live.size();
+		if ((size_t)clip < live.size()) g_clipId = live[(size_t)clip];
 	}
 
 	// Deferred flush. Call every frame; it writes at most once per quiet period.
@@ -613,17 +843,27 @@ namespace rsettings
 			}
 
 			out << kHeader << kVersion << '\n';
+			out << "seen " << (unsigned long long)time(nullptr) << '\n';
+			if (g_clipCount > 0) out << "clips " << g_clipCount << '\n';
 
 			// g_entries is keyed clip-major, so iterating it in order already groups
-			// by clip - the header only has to be emitted when the high half changes.
-			int clip = -1;
+			// by clip - the header only has to be emitted when the scope changes.
+			//
+			// Hex, zero-padded to sixteen, so the column is readable by eye when
+			// somebody opens the file to rescue a project by hand - which is the
+			// stated audience for this format.
+			uint64_t clip = 0;
+			bool     first = true;
 			for (const auto& kv : g_entries)
 			{
 				const MarkerSettings& s = kv.second;
-				if (clipOf(kv.first) != clip)
+				if (first || clipOf(kv.first) != clip)
 				{
-					clip = clipOf(kv.first);
-					out << "clip " << clip << '\n';
+					first = false;
+					clip  = clipOf(kv.first);
+					char id[24];
+					snprintf(id, sizeof(id), "%016llx", (unsigned long long)clip);
+					out << "clip " << id << '\n';
 				}
 
 				out << "marker " << timeOf(kv.first);
