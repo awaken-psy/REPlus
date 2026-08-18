@@ -315,6 +315,7 @@ namespace render
 		int   s_wantClip   = -1;    // clip index requested, -1 = nothing pending
 		float s_wantClipAt = 0.0f;  // time inside it our project clock lands on
 		int   s_clipWait   = 0;     // frames spent waiting for one clip step
+		int   s_declineWait = 0;    // CONSECUTIVE frames the clip table declined
 
 		int   s_pendWait  = 0;      // frames spent waiting for a diverted export
 		unsigned long s_pendStart = 0; // tick when that wait began; 0 = not waiting
@@ -933,6 +934,13 @@ namespace render
 
 		void finish(const char* why, bool complete)
 		{
+			// The replay mode belongs in every one of these. Whether an accessor
+			// could answer at the moment a render stopped is the first thing
+			// worth knowing, and a report that does not carry it costs a whole
+			// round trip to ask for.
+			logger::write("info", "render: finishing at frame %d - replay mode %s",
+				s_frame, gsig::replayModeName(game::replayMode()));
+
 			// Same argument as the pass below, one layer down: the engine is
 			// holding a vtable pointer of OURS while a render steps the replay.
 			// Leaving it swapped past the render outlives what it points into.
@@ -2331,6 +2339,8 @@ namespace render
 
 			if (s_clipN > 0 && at >= 0)
 			{
+				s_declineWait = 0;   // it answered; the streak is over
+
 				// The engine changed clip by itself. It does that whenever the
 				// clock reaches the end of a clip, which our own seeks can
 				// cause, so this is an ordinary way to arrive at the next clip
@@ -2366,7 +2376,32 @@ namespace render
 				return;
 			}
 
-			// No clip table: the old behaviour, span comparison and all.
+			// Reaching here means clipIndex() DECLINED - it answered -1 while we
+			// do have a clip table. That is "ask again in a moment", not "this
+			// project has no clips", and the difference is a whole render.
+			//
+			// It used to fall straight through into the span-comparison path
+			// below, which is the heuristic the clip-table branch above exists to
+			// replace: two clips cut from the same recording report the same
+			// span, so it declares a loop and finishes the render as if complete.
+			// That is the multi-clip export dying part way into clip two.
+			//
+			// Depth of field is what made it reliable rather than occasional: a
+			// pass holds the game for tens of seconds per frame, so a transition
+			// is overwhelmingly likely to be observed inside one.
+			if (s_clipN > 0)
+			{
+				if (++s_declineWait > kBusyGuard)
+				{
+					finish("aborted - the clip table stopped answering", false);
+					return;
+				}
+				s_wait = s_cfg.settleFrames;
+				s_step = Step::Settle;
+				return;
+			}
+
+			// No clip table at all: the old behaviour, span comparison and all.
 			rebaseClip("changed");
 			if (s_looped)
 			{
@@ -3379,6 +3414,31 @@ namespace render
 
 		case Step::DofPass:
 		{
+			// LOADING FIRST, for the same reason Step::Settle checks it first.
+			//
+			// This branch had no such test, and it is the one that needed it
+			// most: a pass runs for tens of seconds, so a clip transition landing
+			// inside one is the normal case on a multi-clip project rather than
+			// the rare one. The add-on cannot finish a sweep across a load - the
+			// frames it is accumulating are a loading screen - and kDofGuardMs
+			// would eventually call that "the pass never finished".
+			//
+			// The watchdog is rebased rather than merely paused: time spent
+			// loading is not time the pass spent failing, and a slow stream-in
+			// should not spend the budget that exists to catch a wedged add-on.
+			if (game::replayBusy() || s_spinnerSeen)
+			{
+				s_spinnerSeen = false;
+				if (++s_busyWait > kBusyGuard)
+				{
+					finish("aborted - stuck loading during a depth-of-field pass", false);
+					return;
+				}
+				s_dofStartMs = GetTickCount();
+				return;
+			}
+			s_busyWait = 0;
+
 			// SLIDING WITH THE LENS: advance the clock between aperture samples.
 			//
 			// The add-on takes one sample per present and we get one pump per

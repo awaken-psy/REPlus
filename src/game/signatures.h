@@ -1680,6 +1680,11 @@ namespace gsig
 	// what the 0xFFFFFFFF above is; passing a real index queries that clip
 	// without going near it.
 	// -------------------------------------------------------------------------
+	// Field offsets in the playback controller itself, read out of the engine's
+	// own accessors rather than guessed. Same in both builds.
+	inline constexpr int PBC_MONTAGE   = 0x08;  // CMontage*, null with no project
+	inline constexpr int PBC_CLIPINDEX = 0x10;  // s32, -1 when there is no clip
+
 	inline constexpr int PBC_VT_GETCLIPINDEX = 0x50;
 	inline constexpr int PBC_VT_GETCLIPCOUNT = 0x58;
 	inline constexpr int PBC_VT_JUMPTOCLIP   = 0x130;

@@ -119,15 +119,37 @@ namespace game
 	// -------------------------------------------------------------------------
 	namespace
 	{
-		// One gate for everything that talks to the controller. The mode test is
-		// not paranoia: the object is a static that outlives any project, so its
-		// montage pointer is null outside the editor and every accessor below
-		// would answer -1 or 0 - which reads as "a project with no clips" rather
-		// than "no project", and that is a far worse thing to hand a renderer.
+		// One gate for everything that talks to the controller, and it tests the
+		// MONTAGE POINTER rather than the replay mode.
+		//
+		// The object is a static that outlives any project. What tells a loaded
+		// project from no project is its montage pointer, at +0x08, which the
+		// engine's own accessors check before touching anything:
+		//
+		//     GetClipCount(this):
+		//         if (this->montage != 0 && this->clipIndex >= 0)
+		//             return *(u16*)(this->montage + 8);
+		//         return -1;
+		//
+		// Verified in BOTH builds, byte for byte - the layout and the guards are
+		// identical. GetClipIndex, GetStartTime and GetEndTime all do the same:
+		// null montage or a negative index returns a sentinel, never a crash. So
+		// calling them is safe whenever the static exists, which is always.
+		//
+		// It USED TO TEST g_ReplayMode == EDIT, and that is what this fixes.
+		// LOADCLIP is the mode the engine drops into while it streams the next
+		// clip of a MULTI-CLIP project, so the mode test made every accessor
+		// decline for the whole of every clip transition - exactly the moment a
+		// renderer most needs to know where it is. The montage does not go away
+		// for a clip step; only the mode does.
+		//
+		// Nothing downstream loses its protection: a null montage still returns
+		// nullptr here, so "no project" reads the same as it always did.
 		void* controller()
 		{
-			if (!addr_g_PlaybackController || !addr_g_ReplayMode) return nullptr;
-			if (*(int*)addr_g_ReplayMode != gsig::REPLAYMODE_EDIT) return nullptr;
+			if (!addr_g_PlaybackController) return nullptr;
+			if (*(void**)(addr_g_PlaybackController + gsig::PBC_MONTAGE) == nullptr)
+				return nullptr;
 			return (void*)addr_g_PlaybackController;
 		}
 
