@@ -156,6 +156,99 @@ On by default; takes over markers set to **Smooth** blend.
 | Speed Profile | Natural / Continuous / Per Segment — pacing |
 | Camera Weight | Off … Full — how much mass the camera has |
 
+**Read this first: the path is one curve through every marker.**
+
+It is not a set of straight lines joined at the markers. That is the whole point
+— straight lines meet at a corner, and a camera that turns a corner instantly
+looks like a cursor, not a camera.
+
+The consequence surprises people, so it is worth stating outright:
+
+> **A marker's direction is decided by the markers either side of it, not by the
+> segment you are looking at.**
+
+At any marker the camera travels roughly parallel to the line joining its
+*previous* and *next* markers. So if you place three markers meaning "go
+straight, then turn right", the camera does not go straight and then turn — it is
+already turning as it passes the middle marker, and the run up to that marker
+**bows slightly left** to set the corner up.
+
+That is the "it drifts left before going right" everyone reports. Nothing is
+broken and no setting is wrong: it is the same line a car takes through a bend,
+and it is why the movement reads as camera work rather than as a mouse cursor.
+The camera still passes exactly through every marker — only the route *between*
+them curves.
+
+It is worth knowing how much. Three markers at `(0,0) → (10,0) → (20,10)`, a
+10 m straight into a 45° turn, measured on the shipping defaults:
+
+> the "straight" leg bows **0.74 m** to the wrong side, worst two thirds of the
+> way along, and the camera is already **26° into the turn** as it passes the
+> middle marker.
+
+Under **Continuous** or **Per Segment** pacing, Curve Shape pulls that in:
+
+| Curve Shape | wrong-way bow | angle at the marker |
+|---|---|---|
+| Uniform | 0.74 m | 26° |
+| Centripetal | 0.57 m | 22° |
+| Chordal *(default)* | **0.43 m** | **18°** |
+
+Under **Natural** pacing — the shipping default — none of those apply and the
+bow sits at the Uniform figure. What moves it there is *when* the markers are,
+which is the next section.
+
+**Marker timing changes the shape of the path, not just the speed.**
+
+This one surprises people who already understand the curve, so it is worth its
+own heading. Under Natural pacing the curve is parameterised by marker **time** —
+the knots are the marker timestamps, not the distances between them. Drag a
+marker along the timeline without moving it an inch in the world and *the route
+changes*.
+
+Same three markers as above, same geometry every time, only the timing moved:
+
+| Marker timing | wrong-way bow |
+|---|---|
+| evenly spaced | 0.74 m |
+| first leg held 4× longer | **1.19 m** |
+| second leg held 4× longer | **0.30 m** |
+
+So a marker you linger on throws a wider curve, and one you rush through pulls
+the path tight. If a corner swings too wide, shortening the leg *into* it is
+often a better fix than touching any setting — and it costs nothing, because you
+were going to time the shot anyway.
+
+This is specific to Natural pacing. Continuous and Per Segment parameterise by
+distance instead, so the *route* stops listening to timing — all three rows above
+measure 0.74 m under those modes. Marker times still set how fast the camera
+covers that route; they just no longer bend it.
+
+**If you want it to go straight and then turn, say so with markers.** A spline
+can only be told where to be, so add a marker where you want it held. Two markers
+close together on the straight section pin the path there and leave the turn to
+happen after them. This is not a workaround; it is how you steer any curve
+editor, and it is the same reason a Bezier in After Effects or Blender bows
+between keys.
+
+Other ways out, in the order worth trying:
+
+| Want | Do |
+|---|---|
+| the path pinned somewhere specific | **add a marker there** — works under every pacing mode, and is almost always the right answer |
+| one corner tightened | **shorten the leg into it** on the timeline — free, and the default pacing is the only one that listens |
+| tighter corners everywhere | **Curve Shape** → Chordal — but only after switching **Speed Profile** off Natural, or it does nothing |
+| one segment perfectly straight | that marker's **Spline Path** → **Stock** |
+| straight lines everywhere | **Spline Path** off globally — back to the stock blend |
+
+The first and last markers have no neighbour to take a direction from, so the
+curve reflects one. If a shot starts by drifting the wrong way, that is why —
+add a marker before the one you actually want to start on.
+
+None of this is affected by **Camera Weight**, which is off by default and is a
+separate thing: the curve above passes through every marker exactly. Weight is
+what makes it stop doing that.
+
 **Speed Profile**
 
 | | |

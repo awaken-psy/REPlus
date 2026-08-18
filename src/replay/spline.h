@@ -23,8 +23,14 @@
 //  when rewinding precisely because a spring cannot run in reverse).
 //
 //  Alpha (the menu's "Spline Tension") picks the knot spacing: 0 uniform,
-//  0.5 centripetal, 1.0 chordal. It DEFAULTS TO 0, which is not the textbook
-//  answer and is deliberate.
+//  0.5 centripetal, 1.0 chordal. It DEFAULTS TO 1.0 - see Config::alpha, which
+//  is the authority and carries the current reasoning. Not the textbook answer,
+//  and deliberate.
+//
+//  It also only reaches the camera under Continuous or Per Segment pacing. The
+//  shipping default is Natural, where the path is hermitePos over marker TIMES
+//  and there is no knot spacing to parameterise - alpha still feeds
+//  segmentLength, so it moves the debug log's `bow` figure and nothing visible.
 //
 //  Centripetal is normally recommended because it provably never cusps or
 //  self-intersects (Yuksel et al., "Parameterization and Applications of
@@ -42,10 +48,16 @@
 //  placed camera markers reverse direction constantly; they are rarely the
 //  smooth monotone polylines the theorem has in mind.
 //
-//  0 also matches the sibling Simple Camera project, whose Hermite is
+//  Lower alpha per marker where a shot wants to flow wide through its marks,
+//  higher where it should be held tight to them. Measured on a 10 m straight
+//  into a 45-degree turn, the deviation of the "straight" leg from the line
+//  between its own two markers:
+//
+//      alpha 0.00 -> 0.74 m     alpha 0.50 -> 0.57 m     alpha 1.00 -> 0.43 m
+//
+//  Uniform also matches the sibling Simple Camera project, whose Hermite is
 //  parameterised by TIME - with roughly even marker spacing that IS uniform
-//  Catmull-Rom. Raise alpha per marker where a shot wants to be held tight to
-//  its marks rather than flowing between them.
+//  Catmull-Rom, which is likewise what Natural pacing here reduces to.
 // =============================================================================
 namespace spline
 {
