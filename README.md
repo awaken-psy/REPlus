@@ -692,9 +692,15 @@ the difference is what the world does between them.
 |---|---|---|
 | the clip | steps forward | paused, seeked per sample |
 | particles, TAA, SSR, RT | keep simulating | reset at every sample |
+| **live cloth** (flags, ropes) | **runs far too fast** | **frozen** |
 | shutter | exact | exact midpoints |
 | frames per output frame | `samples / shutter` | `2·samples + 2` |
 | 64 samples @ 360° | **~1.6 s/frame** | ~4.6 s/frame |
+
+> **Live cloth does not render correctly in either mode.** Flags whip, ropes
+> race, or everything hangs dead still. This is an engine limitation rather than
+> something the renderer chooses — see [Cloth and other live physics](#cloth-and-other-live-physics)
+> below before planning a shot around a flag.
 
 Sliding advances to each frame's mark, then exposes N consecutive frames with
 the world still running. That keeps anything with temporal history warm, which a
@@ -715,6 +721,51 @@ video export uses — which advances the clip by an exact duration accumulated i
 integer nanoseconds. So the shutter is exact rather than approximate, there is
 no calibration to get wrong, no minimum step to fall under, and nothing that
 depends on your frame rate.
+
+### Cloth and other live physics
+
+Flags, ropes and character cloth are **simulated live**, not played back. The
+editor replays recorded positions for everything else, but cloth is integrated
+on top of that as the frames are drawn — which is why it is the one thing that
+does not survive a render intact.
+
+The cloth is a Verlet integrator. Its velocity is implicit in the gap between
+the last two positions, and nothing rescales that gap when the frame timing
+changes, so **cloth advances once per rendered frame rather than once per unit
+of game time**. That single fact produces both failures:
+
+| | presents per output frame | result |
+|---|---|---|
+| Walking | replay paused, none | cloth never steps — **frozen** |
+| Sliding | `RenderSamples`, so 64 by default | 64 steps per frame — **~64× too fast** |
+
+Neither is one step per output frame, which is the only value that would be
+right. Halving `RenderSamples` roughly halves the speed-up, which is the quickest
+way to confirm you are looking at this and not something else.
+
+**It is not specific to the renderer.** The same thing happens in ordinary play:
+put the game in heavy slow motion and cap the frame rate, and cloth stops obeying
+the slow motion somewhere around 33-34 fps — more frames per game-second, more
+integration steps, faster cloth. The renderer only makes it obvious, because 64
+samples is a far bigger multiplier than a frame-rate cap.
+
+There is no fix available from this side. The repair would be to step the cloth
+once per output frame, and the engine takes one global timestep for everything —
+so the single step it took would carry a *sub-sample* dt, about 1/64 of a frame,
+and gravity would be under-applied by the square of that. The flag would move at
+the right speed and hang limp.
+
+**In practice:** avoid putting flags, banners, ropes or loose clothing where they
+carry a shot. If something cloth-bound is unavoidable, Walking at least fails
+predictably — a still flag reads as a windless day, where a whipping one reads as
+broken footage.
+
+> Vegetation may be a separate problem. Tree and grass wind is a vertex-shader
+> effect driven by a clock the engine hands to the shader, not an integrator, so
+> it cannot be sped up by taking more samples — a stateless `sin(phase + t)`
+> gives the same answer however often it is asked. If trees also look fast in a
+> render, that points at the clock feeding them rather than at anything here, and
+> it is unconfirmed either way.
 
 ### Depth of field
 
@@ -986,6 +1037,8 @@ you can change it. Delete the ini to have a current one written.
 | Symptom | Cause |
 |---|---|
 | Export gives a normal watermarked video | Capture add-on not found — the mod stepped aside rather than produce the wrong thing. Either ReShade was installed without add-on support, or `IgcsConnector.addon64` is not beside the executable. The log names which |
+| Flags and ropes whip far too fast in the render | Sliding renders cloth once per sample instead of once per frame, so 64 samples means roughly 64× the speed. Engine limitation, no setting fixes it — see [Cloth and other live physics](#cloth-and-other-live-physics) |
+| Flags and ropes completely still in the render | Walking pauses the replay, and live cloth never integrates while it is paused. The other half of the same limitation |
 | Colours wrong in the render, fine on screen | Fixed in this build, with nothing to set. The add-on used to ask ReShade for the finished frame, and ReShade hands the channels back in a different order depending on its own version, so on some installs red and blue arrived swapped. It copies the back buffer itself now and reads the order from the buffer's own description. `RenderChannelOrder` and the **Colour Channels** row are gone |
 | Got frames, expected video | `RenderMode=Frames`, or ffmpeg not found — the log says which |
 | A shake setting does nothing | Per-marker values override the ini and always win. If the menu shows a number rather than `Default`, that marker has its own. `ShakeDebugLog=1` logs what reached the camera |
