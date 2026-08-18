@@ -487,13 +487,6 @@ namespace fxcapture
 		s_block->dofSeq = 0;
 	}
 
-	void setChannelOrder(int order)
-	{
-		if (!s_block) return;
-		if (order < 0 || order > 2) order = 0;
-		s_block->channelOrder = (uint32_t)order;
-	}
-
 	bool newSequenceFolder(const char* baseIn, char* outFolder, int cap)
 	{
 		if (!s_block) return false;

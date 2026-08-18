@@ -212,8 +212,6 @@ RenderDofQuality=12        ; rings of samples. Higher = smoother bokeh, slower
 RenderDofAutofocus=1       ; measure focus in the world each frame
 RenderJpeg=0               ; 0 = PNG
 RenderQuality=100          ; JPEG only. Below 91 = chroma subsampled
-; Colours wrong but the screen fine? Auto misreads Legacy/FiveM. Try 1, then 2.
-RenderChannelOrder=0       ; 0 auto / 1 RGBA / 2 BGRA
 RenderHideHud=1            ; hide the editor HUD and cursor while rendering
 ExportCloseWhenDone=1      ; return to the editor menus when done
 ; Empty = RockstarEditorPlus\Captures\
@@ -225,8 +223,8 @@ RenderKeepFrames=0         ; Video mode: keep the frames too
 ; Empty = the bundled copy, then beside the exe, then PATH.
 FfmpegPath=
 
-; Named preset from presets\ (h264, h265, nvenc_hevc, prores_hq, prores_4444,
-; lossless). Blank it to use the two keys below instead.
+; Named preset from presets\ - see that folder, or the Encoder presets tab in
+; RE+ Render Settings. Blank it to use the two keys below instead.
 RenderVideoPreset=
 ; IGNORED while a preset is named above - it supplies both of these.
 RenderVideoArgs=-c:v libx264 -crf 16 -preset slow -pix_fmt yuv420p

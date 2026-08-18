@@ -47,8 +47,21 @@ struct FxCaptureBlock
 	uint32_t addonHeartbeat; // addon bumps this every present; 0 = addon not loaded
 	char outPath[512];       // ASI writes the full destination path; the addon
 	                         // picks PNG vs JPEG from the .png / .jpg extension
-	uint32_t channelOrder;   // 0 = Auto (addon detects the back-buffer format),
-	                         // 1 = force RGBA (no swap), 2 = force BGRA (swap R/B)
+	// DEAD SLOT. Was channelOrder, which told the add-on which order to read the
+	// back buffer's colour channels in.
+	//
+	// Kept, rather than deleted, purely to hold the offsets of everything below
+	// it. THREE binaries map this block - this ASI, Simple Camera and the add-on
+	// - and they do not ship in lockstep, so taking four bytes out of the middle
+	// would silently shift every field after it and corrupt autofocus and the
+	// depth-of-field handshake on any mismatched pair.
+	//
+	// It existed because the add-on asked ReShade for the finished frame, and
+	// ReShade returns the channels in a different order depending on its own
+	// version. The add-on copies the back buffer itself now and takes the order
+	// from the resource description, which cannot disagree with itself, so there
+	// is no longer anything to choose. Written by nobody, read by nobody.
+	uint32_t reserved_wasChannelOrder;
 
 	// --- autofocus for the depth-of-field session (v7) --------------------
 	//
@@ -223,7 +236,6 @@ namespace fxcapture
 
 	void setQuality(int quality);         // JPEG only, 1..100
 	void setHighlightBoost(float boost);  // 0..~1
-	void setChannelOrder(int order);      // 0 auto / 1 RGBA / 2 BGRA
 
 	// --- autofocus ------------------------------------------------------------
 	// The add-on's depth-of-field panel asks for focus; we answer with what is

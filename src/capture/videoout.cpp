@@ -47,26 +47,88 @@ namespace videoout
 		void writeDefaultPresets()
 		{
 			struct P { const char* name; const char* ext; const char* args; const char* note; };
+
+			// COL is the colour tagging every delivery and editing preset wants.
+			//
+			// The renderer hands over RGB frames, so anything YUV is a
+			// conversion. An untagged file leaves the player to guess which
+			// primaries it was converted with, and players guess 601 often
+			// enough that every hue shifts slightly - an error that survives a
+			// whole grade before anyone notices. The two sws flags stop the
+			// conversion itself rounding badly on the way.
+			#define COL " -sws_flags +accurate_rnd+full_chroma_int" \
+			             " -colorspace bt709 -color_primaries bt709" \
+			             " -color_trc bt709 -color_range tv"
+
 			static const P kDefaults[] = {
-				{ "h264",       "mp4", "-c:v libx264 -crf 16 -preset slow -pix_fmt yuv420p",
-				  "Near-lossless h.264. Plays anywhere. The safe default." },
-				{ "h265",       "mp4", "-c:v libx265 -crf 20 -preset slow -pix_fmt yuv420p",
-				  "Similar quality at roughly half the size, slower to encode." },
-				{ "nvenc_hevc", "mp4", "-c:v hevc_nvenc -cq 20 -preset p7 -pix_fmt yuv420p",
-				  "GPU encode - much faster, needs an NVIDIA card." },
-				{ "prores_hq",  "mov", "-c:v prores_ks -profile:v 3 -pix_fmt yuv422p10le"
-				  " -sws_flags +accurate_rnd+full_chroma_int"
-				  " -colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv",
-				  "ProRes 422 HQ, 10-bit. 4:2:2 - halves colour resolution, which "
-				  "shreds saturated text. Fine for ordinary footage." },
-				{ "prores_4444","mov", "-c:v prores_ks -profile:v 4 -pix_fmt yuv444p10le"
-				  " -sws_flags +accurate_rnd+full_chroma_int"
-				  " -colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv",
-				  "ProRes 4444. FULL colour resolution - the only preset that keeps "
-				  "red text and UI intact. Use this if anything on screen is saturated." },
-				{ "lossless",   "mkv", "-c:v libx264 -qp 0 -preset veryslow",
-				  "Mathematically lossless. Archival; very large." },
+			// --- delivery ------------------------------------------------
+			{ "h264",             "mp4", "-c:v libx264 -crf 16 -preset slow -pix_fmt yuv420p" COL,
+			  "Near-lossless H.264. Plays anywhere. The safe default." },
+			{ "h264_upload",      "mp4", "-c:v libx264 -crf 20 -preset slow -pix_fmt yuv420p" COL,
+			  "Smaller H.264 for uploading, where the site re-encodes anyway." },
+			{ "h265",             "mp4", "-c:v libx265 -crf 20 -preset slow -pix_fmt yuv420p" COL,
+			  "Similar quality at roughly half the size, slower to encode." },
+			{ "av1",              "mkv", "-c:v libaom-av1 -crf 25 -b:v 0 -cpu-used 4 -pix_fmt yuv420p" COL,
+			  "The best compression here, and the slowest. For uploads." },
+			{ "vp9",              "webm","-c:v libvpx-vp9 -crf 28 -b:v 0 -deadline good -cpu-used 2 -pix_fmt yuv420p" COL,
+			  "WebM for the browser. Every browser decodes it natively." },
+
+			// --- delivery, on the GPU ------------------------------------
+			{ "nvenc_h264",       "mp4", "-c:v h264_nvenc -rc vbr -cq 22 -b:v 0 -preset p7 -tune hq -pix_fmt yuv420p" COL,
+			  "GPU H.264. Much faster than x264, larger for the same look." },
+			{ "nvenc_hevc",       "mp4", "-c:v hevc_nvenc -rc vbr -cq 22 -b:v 0 -preset p7 -tune hq -pix_fmt yuv420p" COL,
+			  "GPU HEVC. The usual pick for long renders - needs an NVIDIA card." },
+			{ "nvenc_hevc_10bit", "mp4", "-c:v hevc_nvenc -rc vbr -cq 22 -b:v 0 -preset p7 -tune hq -pix_fmt p010le" COL,
+			  "GPU HEVC at 10-bit. Costs nothing extra on the GPU and takes the "
+			  "banding out of skies and smoke, which is where 8-bit shows first." },
+			{ "nvenc_av1",        "mkv", "-c:v av1_nvenc -rc vbr -cq 25 -b:v 0 -preset p7 -pix_fmt yuv420p" COL,
+			  "GPU AV1. Needs an RTX 40-series or newer. libaom quality at a "
+			  "fraction of the time." },
+
+			// --- editing intermediates -----------------------------------
+			{ "prores_hq",        "mov", "-c:v prores_ks -profile:v hq -pix_fmt yuv422p10le" COL,
+			  "ProRes 422 HQ, 10-bit. 4:2:2 - halves colour resolution, which "
+			  "shreds saturated text. Fine for ordinary footage." },
+			{ "prores_4444",      "mov", "-c:v prores_ks -profile:v 4444 -pix_fmt yuv444p10le" COL,
+			  "ProRes 4444. FULL colour resolution - the one to use if anything "
+			  "on screen is saturated UI or text." },
+			{ "dnxhr_hq",         "mov", "-c:v dnxhd -profile:v dnxhr_hq -pix_fmt yuv422p" COL,
+			  "Avid DNxHR HQ, 8-bit 4:2:2. What Resolve and Media Composer prefer." },
+			{ "dnxhr_444",        "mov", "-c:v dnxhd -profile:v dnxhr_444 -pix_fmt yuv444p10le" COL,
+			  "DNxHR 444, 10-bit full colour. The DNxHR answer to ProRes 4444." },
+			{ "cineform",         "mov", "-c:v cfhd -quality film3+ -pix_fmt yuv422p10le" COL,
+			  "GoPro CineForm at its highest quality. Visually lossless, smaller "
+			  "than ProRes, scrubs just as well." },
+
+			// --- lossless -------------------------------------------------
+			{ "utvideo",          "mkv", "-c:v utvideo -pred median -pix_fmt gbrp",
+			  "Ut Video, RGB. The practical replacement for Lagarith - bit-exact, "
+			  "fast, and there is a free VfW codec so editors read it directly." },
+			{ "magicyuv",         "mkv", "-c:v magicyuv -pred median -pix_fmt gbrp",
+			  "MagicYUV, RGB. Same idea and size as Ut Video, different VfW codec." },
+			{ "ffv1",             "mkv", "-c:v ffv1 -level 3 -pix_fmt yuv444p",
+			  "Archival lossless, about a third smaller than Ut Video. Slow to "
+			  "scrub - a storage format rather than an editing one." },
+			{ "lossless",         "mkv", "-c:v libx264 -qp 0 -preset veryslow -pix_fmt yuv444p",
+			  "Mathematically lossless and the smallest of the lossless options "
+			  "by far. Slow to encode and slow to scrub." },
+			{ "qtrle",            "mov", "-c:v qtrle -pix_fmt rgb24",
+			  "Lossless MOV every editor reads with nothing installed. Enormous." },
+
+			// --- share ----------------------------------------------------
+			{ "webp",             "webp","-c:v libwebp_anim -lossless 0 -quality 90 -pix_fmt bgra",
+			  "Animated WebP - a far better GIF. Full colour, plays inline in "
+			  "every current browser." },
+			{ "gif",              "gif",
+			  "-filter_complex split[a][b];[a]palettegen=stats_mode=diff[p];"
+			  "[b][p]paletteuse=dither=bayer:bayer_scale=5[v] -map [v] -c:v gif",
+			  "256 colours and no audio. Builds a palette from the clip instead of "
+			  "using a generic one, which is worth roughly three times the file "
+			  "size AND looks better. Keep it short and drop RenderFps - a small "
+			  "MP4 usually beats it on both counts." },
 			};
+
+			#undef COL
 
 			const std::string dir = paths::sub("presets");
 			for (const P& p : kDefaults)
@@ -78,7 +140,7 @@ namespace videoout
 				if (!f) continue;
 				f << "; " << p.note << "\n"
 				  << "; Use with RenderVideoPreset=" << p.name
-				  << " in RockstarEditorPlus.ini\n\n"
+				  << " in Render.ini\n\n"
 				  << "[Preset]\n"
 				  << "Args=" << p.args << "\n"
 				  << "Ext="  << p.ext  << "\n";
@@ -274,10 +336,33 @@ namespace videoout
 		// from this project moments ago, where the ini setting is whatever the
 		// user last pointed at.
 		const std::string src = !s_audioOverride.empty() ? s_audioOverride : cfg.audioFromFile;
+
+		// SOME CONTAINERS HAVE NOWHERE TO PUT AUDIO, and ffmpeg does not shrug
+		// that off - it refuses the whole job. "-map 1:a" naming a stream the
+		// muxer will not accept ends in "nothing was written into output file",
+		// so the render produces NO VIDEO EITHER.
+		//
+		// Which matters because RenderAudio ships ON. Every one of the share
+		// formats - gif, webp, apng - failed outright the moment they were
+		// offered as presets, and the failure looked like the preset being
+		// broken rather than the muxing.
+		//
+		// The wav is still written to the render folder by the audio pass, so
+		// nothing is lost; it just arrives beside the file instead of inside it.
+		bool carriesAudio = true;
+		for (const char* mute : { "gif", "webp", "apng" })
+			if (_stricmp(ext.c_str(), mute) == 0) carriesAudio = false;
+
 		std::string audio;
 		if (!src.empty())
 		{
-			if (GetFileAttributesA(src.c_str()) != INVALID_FILE_ATTRIBUTES)
+			if (!carriesAudio)
+			{
+				logger::write("info",
+					"video: .%s cannot carry audio - the track is left beside the video as a wav",
+					ext.c_str());
+			}
+			else if (GetFileAttributesA(src.c_str()) != INVALID_FILE_ATTRIBUTES)
 			{
 				audio = " -i " + quoted(src.c_str()) +
 				        " -map 0:v -map 1:a -c:a aac -b:a 320k -shortest";

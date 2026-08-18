@@ -1308,7 +1308,6 @@ namespace render
 		}
 		s_cfg.quality      = c.renderQuality;
 		s_cfg.highlight    = c.renderHighlight;
-		s_cfg.channelOrder = c.renderChannelOrder;
 		s_cfg.captureMode  = c.renderCaptureMode;
 		s_cfg.dof          = c.renderDof;
 		s_cfg.dofBokehSize = c.renderDofBokehSize;
@@ -1488,7 +1487,6 @@ namespace render
 
 			fxcapture::setQuality(s_cfg.quality);
 			fxcapture::setHighlightBoost(s_cfg.highlight);
-			fxcapture::setChannelOrder(s_cfg.channelOrder);
 
 			// Pause first: every frame time from here is one we chose. If playback
 			// kept running, the clock would move between our jump and the addon's

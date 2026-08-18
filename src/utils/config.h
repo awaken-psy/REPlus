@@ -545,9 +545,6 @@ struct Config
 			"RenderHighlightBoost=%g%s; keeps specular streaks bright through accumulation\n"
 			"RenderJpeg=%d%s; 0 = PNG\n"
 			"RenderQuality=%d%s; JPEG only. Below 91 = chroma subsampled\n"
-			"; 0 auto (the add-on reads the back-buffer format) / 1 RGBA / 2 BGRA.\n"
-			"; Auto is known to get this wrong on Legacy, FiveM especially. Try 1, then 2.\n"
-			"RenderChannelOrder=%d%s; 0 auto / 1 RGBA / 2 BGRA\n"
 			"RenderHideHud=%d%s; hide the editor HUD and cursor while rendering\n"
 			"ExportCloseWhenDone=%d%s; return to the editor menus after an Export render\n"
 			"; Empty = RockstarEditorPlus\\Captures\\\n"
@@ -559,7 +556,6 @@ struct Config
 			renderShutter, "          ", renderSettleFrames, "     ",
 			renderSettleSubFrames, "  ", renderHighlight, "   ",
 			renderJpeg ? 1 : 0, "               ", renderQuality, "           ",
-			renderChannelOrder, "      ",
 			renderHideHud ? 1 : 0, "            ",
 			exportCloseWhenDone ? 1 : 0, "      ",
 			renderOutputFolder.c_str());
@@ -584,8 +580,8 @@ struct Config
 			"RenderKeepFrames=%d%s; Video mode: keep the frames as well\n"
 			"; Empty = RockstarEditorPlus\\ffmpeg.exe, then beside the exe, then PATH.\n"
 			"FfmpegPath=%s\n\n"
-			"; Named preset from presets\\ (h264, h265, nvenc_hevc, prores_hq,\n"
-			"; prores_4444, lossless). Blank it to use the two keys below instead.\n"
+			"; Named preset from presets\\ - see that folder, or the Encoder\n"
+			"; presets tab in RE+ Render Settings. Blank = use the two keys below.\n"
 			"RenderVideoPreset=%s\n\n"
 			"; IGNORED while a preset is named above - it supplies both of these.\n"
 			"RenderVideoArgs=%s\n"
@@ -639,6 +635,8 @@ struct Config
 			"RenderCaptureMode",
 			"RenderFps", "RenderSamples", "RenderShutter",
 			"RenderSettleFrames", "RenderSettleSubFrames", "RenderHighlightBoost",
+			// RenderChannelOrder no longer exists, and STAYS on this list for that
+			// reason: this loop is what deletes it from the old ini.
 			"RenderJpeg", "RenderQuality", "RenderChannelOrder", "RenderHideHud",
 			"ExportCloseWhenDone", "RenderOutputFolder", "RenderVideo",
 			"RenderKeepFrames", "FfmpegPath", "RenderVideoPreset",
@@ -824,7 +822,6 @@ struct Config
 	bool  renderJpeg         = false;
 	int   renderQuality      = 100;
 	float renderHighlight    = 0.90f;
-	int   renderChannelOrder = 0;
 
 	// Hide the editor's playback HUD while rendering - timer, transport row,
 	// scrub bar and the instructional button strip. Off only if you actually
@@ -1227,14 +1224,13 @@ struct Config
 		if (renderQuality < 1)   renderQuality = 1;
 		if (renderQuality > 100) renderQuality = 100;
 
-		// THIS LINE WAS MISSING. The key was declared, copied into the render
-		// settings, handed to the add-on and listed in kMoved so the migration
-		// deleted it from the old ini - everything except being read. So it sat
-		// at its default of 0 (Auto) whatever anyone wrote in the file, and the
-		// reports were exactly what you would expect: "inverted colours, and it
-		// makes no difference whether I set Auto, RGBA or BGRA", because only
-		// Auto ever ran.
-		renderChannelOrder = rInt("RenderChannelOrder", renderChannelOrder);
+		// RenderChannelOrder is gone: the add-on copies the back buffer itself
+		// and takes the channel order from the resource description, so there is
+		// nothing left to pick. Delete it on sight rather than just ignoring it -
+		// an existing Render.ini is never rewritten wholesale, so a key left
+		// behind sits there looking like a setting for as long as the file lives.
+		if (!renderIniPath.empty())
+			WritePrivateProfileStringA("Render", "RenderChannelOrder", nullptr, renderIniPath.c_str());
 		renderHighlight    = rFloat("RenderHighlightBoost", renderHighlight);
 		renderHideHud         = rBool("RenderHideHud", renderHideHud);
 		// Both of these were renamed. Read the OLD key first so an existing

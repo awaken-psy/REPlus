@@ -51,7 +51,7 @@ Enhanced (`GTA5_Enhanced.exe`), singleplayer and FiveM, one build.
 | GTA V | Legacy or Enhanced. Singleplayer or FiveM |
 | ASI loader | any |
 | ReShade | **rendering and DOF only**, must be the build **with full add-on support** |
-| `IgcsConnector.addon64` | **the bundled copy** — capture bridge, rendering and DOF only |
+| `IgcsConnector.addon64` | **the bundled copy** (our fork) — capture bridge, rendering and DOF only |
 | `ffmpeg.exe` | bundled — video output only |
 
 Camera and shake need only the ASI loader.
@@ -61,10 +61,14 @@ buffer; the add-on does that. The ordinary ReShade build cannot load add-ons at
 all — `IgcsConnector.addon64` is then ignored and Export falls back to the game's
 watermarked encoder with no indication why. ReShade itself is not bundled.
 
-**Use the bundled `IgcsConnector.addon64`, not one from anywhere else.** It is a
-modified build carrying the shared-memory capture channel this mod drives; a
-stock IGCS Connector has no such channel, so it will load, present happily, and
-never capture a frame.
+**Use the bundled `IgcsConnector.addon64`, not one from anywhere else.** It is
+our own fork of IGCS Connector, maintained at
+[crxhvrd/simplecamera](https://github.com/crxhvrd/simplecamera) and built to
+work with these mods rather than as a general-purpose add-on. It carries the
+shared-memory capture channel this mod drives, the depth-of-field changes the
+renderer depends on — external clock stepping, per-sample indexing, world
+autofocus — and the **Copy to keyframe** button. Upstream IGCS Connector has
+none of that: it will load, present happily, and never capture a frame.
 
 The **Rockstar Editor+** row on the Export screen states both requirements and
 tells you which one is currently unmet — no ReShade, the wrong ReShade build, or
@@ -113,8 +117,8 @@ All settings are in the editor. Open a marker's menu and find the
 
 | Where | Behaviour |
 |---|---|
-| Top-level marker menu | pages through global settings: **Curve**, **Limits**, **Scene** |
-| Camera submenu | group switcher: Spline, Shake, Shake Motion, 4 advanced pages |
+| Top-level marker menu | pages through global settings: **Curve**, **Limits**, **Scene**, **Scene Lights** |
+| Camera submenu | group switcher: Spline, **Depth of Field**, Shake, Shake Motion, 4 advanced pages |
 | **Export screen** | the renderer's own settings, under the stock Frame Rate and Bit rate |
 
 Pages rather than one long list because the editor's Scaleform column draws 16
@@ -544,10 +548,30 @@ of ready-made ffmpeg command lines. Audio works here too — it lands as
 `audio.wav` beside the frames and `assemble.txt` carries the arguments that mux
 it onto whichever conform you pick.
 
-The capture is identical either way. Codecs come from `presets\` — `h264`,
-`h265`, `nvenc_hevc`, `prores_hq`, `prores_4444`, `lossless` — selected with
+The capture is identical either way. Codecs come from `presets\`, selected with
 `RenderVideoPreset=h265`, or write ffmpeg arguments directly into
 `RenderVideoArgs`. Edited presets persist; a deleted one is rewritten.
+
+Twenty-one ship, in five groups:
+
+| | |
+|---|---|
+| **Delivery** | `h264` `h264_upload` `h265` `av1` `vp9` |
+| **Delivery, GPU** | `nvenc_h264` `nvenc_hevc` `nvenc_hevc_10bit` `nvenc_av1` |
+| **Editing** | `prores_hq` `prores_4444` `dnxhr_hq` `dnxhr_444` `cineform` |
+| **Lossless** | `utvideo` `magicyuv` `ffv1` `lossless` `qtrle` |
+| **Share** | `webp` `gif` |
+
+`utvideo` is the one to reach for if you used **Lagarith** elsewhere — ffmpeg
+can read Lagarith but has no encoder for it, and Ut Video is the same idea,
+faster, with a free VfW codec so editors read it off the timeline. `ffv1` is
+about a third smaller for the same bit-exact result but scrubs badly; `lossless`
+(x264 at qp 0) is smaller still and slower again.
+
+Every delivery and editing preset tags colour as BT.709 and converts with
+`+accurate_rnd+full_chroma_int`. The renderer hands over RGB frames, so anything
+YUV is a conversion, and an untagged file leaves the player guessing which
+primaries it used — players guess 601 often enough that every hue shifts.
 
 **Motion blur** — 64 samples at a 360° shutter by default. Every sample is a
 real render at a real instant, so this is true accumulation, not a screen-space
@@ -657,22 +681,47 @@ sweep radially — tight bokeh at one end of the trail, wide at the other.
 
 **Focus, per marker**
 
-Under **Rockstar Editor+ → Depth of Field** in the marker menu:
+Under **Cameras → Rockstar Editor+ → Depth of Field**, alongside the Spline and
+Shake groups:
 
 | | |
 |---|---|
 | Autofocus | measure focus in the world each frame, at the centre of frame |
 | Focus Distance | manual focus, in the add-on's own disparity units |
 
+Autofocus is the switch between the two: with it on, Focus Distance is greyed
+out, because autofocus overrides it. It stays reachable on every marker — no
+camera transition and no particular camera type required, unlike the Spline
+rows in the same submenu, which grey out without a blend to act on.
+
 Both are per marker. Focus Distance is **interpolated between markers**, so two
 different values across a shot give a focus pull. A marker with nothing set
 holds the previous focus rather than racking back to the default.
 
-To set one by hand: open a depth-of-field session, focus by eye, note the panel's
-Focus Delta, close the session and enter it on the marker. That number is a
-**disparity, not a distance** — it scales with the aperture, so the panel's Max
-Bokeh Size has to match `RenderDofBokehSize` or every value will be out by the
-same ratio.
+The pull is **eased, not linear** — smoothstep, so focus is stationary at both
+markers and accelerates between them. A rack that starts and stops instantly
+reads as a motor; a puller eases in and settles out. On a chain of markers that
+means it settles at each one, which is what racking to one subject and then to
+another should do. Markers that do not change focus are unaffected either way.
+
+It is also linear in **disparity** rather than in distance, which is roughly
+linear in dioptres — the same thing a real lens barrel does, and even in
+perceived defocus. Linear in metres would hang at the near end and snap at the
+far one.
+
+**Setting one: Copy to keyframe.** Open a depth-of-field session, focus by eye,
+and press **Copy to keyframe** in the add-on's panel. It writes that focus onto
+the marker the editor is on and switches the marker to manual.
+
+It converts as it copies, which is the point of it. Focus Delta is a
+**disparity, not a distance** — it scales with the aperture — so a value read at
+the session's Max Bokeh Size means a different plane at the render aperture.
+The button rescales between the two, so they no longer have to match by hand.
+
+You can still type a number into Focus Distance directly. If you do, the same
+caveat applies: it is measured against `RenderDofBokehSize`, not against
+whatever the panel was set to. Changing the aperture afterwards rescales every
+stored focus value with it, so a pull keeps its shape.
 
 > The slider only appears when the connected camera tools can step a clock,
 > which outside this mod is essentially never — so on any other game the panel
@@ -759,7 +808,6 @@ attached. The keys below that have no row are the ones you set once.
 | `RenderJpeg` `RenderQuality` | 0 / 90 | JPEG instead of PNG |
 | `RenderKeepFrames` | 0 | Video mode: keep frames too |
 | `RenderVideoPreset` | | a name from `presets\` |
-| `RenderChannelOrder` | 0 | 0 auto / 1 RGBA / 2 BGRA |
 | `FfmpegPath` | | empty = bundled, then beside the exe, then PATH |
 | `RenderAudio` | 1 | record and mux project sound |
 | `RenderHideHud` | 1 | hide the editor HUD while rendering |
@@ -786,11 +834,45 @@ RockstarEditorPlus\
 ```
 
 **RE+ Render Settings** is a standalone editor for the render settings and the
-encoder presets, sitting next to the files it edits. Every setting carries its
-own explanation, and choosing a codec narrows the container and pixel-format
-lists to the ones that actually work — a container that cannot hold the codec
-makes ffmpeg refuse, and that failure is otherwise invisible. It writes
-line-by-line, so the comments in the ini survive being edited through it.
+encoder presets, sitting next to the files it edits.
+
+Settings are grouped by what they do — renderer, motion blur, depth of field,
+image files, output and encoding — and every one carries its own explanation,
+shown on hover or on click.
+
+**A greyed-out setting is one the renderer will not read** with the options you
+have chosen, and that is worth more than it sounds. Highlight boost with motion
+blur off, JPEG quality with PNG selected, ffmpeg arguments with a preset written
+over them — each of those is unreachable in the renderer, and tuning one and
+seeing no change is indistinguishable from the mod being broken. The relevance
+rules are the same ones the in-editor Export screen uses.
+
+Numbers are held to their accepted range when the file is written, and the tool
+says which ones it moved. The renderer would clamp them silently on load, which
+is how a `RenderSettleSubFrames=0` stays in a file being blamed for motion blur
+that "does nothing".
+
+Choosing a codec narrows the container and pixel-format lists to the ones that
+actually work — a container that cannot hold the codec makes ffmpeg refuse, and
+that failure is otherwise invisible. It writes line-by-line, so the comments in
+the ini survive being edited through it.
+
+The **Encoder presets** tab builds those files. Twenty-four codecs across the
+same five groups, each with its own quality or profile ladder, encoding speed,
+tune, pixel format and container — and an **Extra arguments** box for anything
+not covered. A live preview shows the exact `Args=` and `Ext=` that will be
+written.
+
+Two things there are worth knowing. The codec list is filtered by what your
+ffmpeg build actually contains, and **Test preset** encodes one frame with the
+exact settings on screen and reports what ffmpeg said. That catches the case the
+filtering cannot: every QSV and AMF encoder is present in the bundled ffmpeg and
+none of them open without the matching hardware, so a preset built on one
+produces no video and a stderr line you never see.
+
+Where a profile decides the pixel format — ProRes and DNxHR both — they are one
+choice rather than two, because neither encoder reconciles a mismatched pair;
+they refuse at startup.
 
 Paths resolve from the `.asi`, not from the game executable — under FiveM that
 puts everything in `plugins\RockstarEditorPlus\`. Set `RenderOutputFolder` to an
@@ -811,7 +893,7 @@ you can change it. Delete the ini to have a current one written.
 | Symptom | Cause |
 |---|---|
 | Export gives a normal watermarked video | Capture add-on not found — the mod stepped aside rather than produce the wrong thing. Either ReShade was installed without add-on support, or `IgcsConnector.addon64` is not beside the executable. The log names which |
-| Colours wrong in the render, fine on screen | **Colour Channels** on the Export screen, or `RenderChannelOrder` — try 1, then 2. Auto is known to mis-detect on Legacy, FiveM especially. Fixed in this build: the key was never read, so it stayed on Auto whatever you set |
+| Colours wrong in the render, fine on screen | Fixed in this build, with nothing to set. The add-on used to ask ReShade for the finished frame, and ReShade hands the channels back in a different order depending on its own version, so on some installs red and blue arrived swapped. It copies the back buffer itself now and reads the order from the buffer's own description. `RenderChannelOrder` and the **Colour Channels** row are gone |
 | Got frames, expected video | `RenderMode=Frames`, or ffmpeg not found — the log says which |
 | A shake setting does nothing | Per-marker values override the ini and always win. If the menu shows a number rather than `Default`, that marker has its own. `ShakeDebugLog=1` logs what reached the camera |
 | Shake looks frozen | The playhead is paused. Play or scrub |
@@ -842,8 +924,12 @@ outputs and are not tracked.
 
 GPL-3.0-only. See [LICENSE](LICENSE).
 
-Bundles [MinHook](https://github.com/TsudaKageyu/minhook) (BSD 2-clause), a
-GPLv3 build of [FFmpeg](https://ffmpeg.org), and
+Bundles [MinHook](https://github.com/TsudaKageyu/minhook) (BSD 2-clause) and a
+GPLv3 build of [FFmpeg](https://ffmpeg.org).
+
+`IgcsConnector.addon64` and `IgcsDof.fx` are our modified builds of
 [IgcsConnector](https://github.com/FransBouma/IgcsConnector) by Frans Bouma
-(add-on MIT, `IgcsDof.fx` BSD 2-clause). Licence texts and source information
-ship in `RockstarEditorPlus\`.
+(add-on MIT, `IgcsDof.fx` BSD 2-clause). Our fork lives at
+[crxhvrd/simplecamera](https://github.com/crxhvrd/simplecamera) — it exists to
+serve these mods and is not a drop-in replacement for the upstream add-on.
+Licence texts and source information ship in `RockstarEditorPlus\`.

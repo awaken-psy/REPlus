@@ -101,10 +101,6 @@ namespace exportmenu
 			ROW_SHUTTER,      // renderShutter
 			ROW_HIGHLIGHT,    // renderHighlight
 			ROW_AUDIO,        // renderAudio
-			// Last, with Output: it is a fix-it row, not a creative one. Nobody
-			// sets it on purpose - you come here because a render came out with
-			// red and blue swapped.
-			ROW_CHANNELS,     // renderChannelOrder
 			ROW_COUNT
 		};
 
@@ -326,7 +322,6 @@ namespace exportmenu
 			case ROW_SHUTTER:   return "Shutter";
 			case ROW_HIGHLIGHT: return "Highlight Boost";
 			case ROW_AUDIO:     return "Audio";
-			case ROW_CHANNELS:  return "Colour Channels";
 			default:            return "";
 			}
 		}
@@ -408,11 +403,6 @@ namespace exportmenu
 
 			case ROW_AUDIO:
 				return c.renderAudio ? "On" : "Off";
-
-			case ROW_CHANNELS:
-				return c.renderChannelOrder == 1 ? "RGBA"
-				     : c.renderChannelOrder == 2 ? "BGRA"
-				                                 : "Auto";
 
 			default:
 				return "";
@@ -681,19 +671,6 @@ namespace exportmenu
 				       "The recording is WASAPI loopback aimed at the game's own process, "
 				       "so anything else playing on the machine stays out of it.";
 
-			case ROW_CHANNELS:
-				return "Which order the add-on reads the back buffer's colour channels "
-				       "in.\n\n"
-				       "Auto lets it work that out from the buffer's own format. It is "
-				       "KNOWN TO GET IT WRONG on Legacy, FiveM especially, where renders "
-				       "come out with the colours wrong while the screen looks fine - so "
-				       "if that is what you are seeing, step this to RGBA, and if that does "
-				       "not do it, BGRA. It only affects what is written to disk.\n\n"
-				       "If neither forced order fixes it, the problem is not channel order "
-				       "and this row is not the answer - worth reporting rather than "
-				       "cycling, because it means something else is transforming the "
-				       "frame.";
-
 			default:
 				return "";
 			}
@@ -863,18 +840,6 @@ namespace exportmenu
 				c.writeRenderBool("RenderAudio", c.renderAudio);
 				break;
 
-			case ROW_CHANNELS:
-			{
-				// Cycles rather than clamps. There are three values, none is a
-				// "more" or "less" of the others, and the whole point of the row
-				// is trying the other two - so walking off either end should
-				// bring you back round rather than parking you at BGRA.
-				const int next = (c.renderChannelOrder + (delta > 0 ? 1 : 2)) % 3;
-				c.renderChannelOrder = next;
-				c.writeRenderInt("RenderChannelOrder", next);
-				break;
-			}
-
 			default:
 				return;
 			}
@@ -903,29 +868,20 @@ namespace exportmenu
 		// Walking, Motion Blur gone. Worse than greying, because the stale rows
 		// look authoritative.
 		//
-		// So the set is constant and relevance is shown by greying. That fixes
-		// the budget at 13: the column shows 16 and the screen carries 3 stock
-		// rows. Colour Channels is what gives way - see below.
+		// So the set is constant and relevance is shown by greying. The column
+		// shows 16 and the screen carries 3 stock rows, so 13 is the budget.
 		bool rowVisible(int row)
 		{
-			// The one row dropped to fit the column.
+			// Every row fits, so every row is drawn.
 			//
-			// The column draws SIXTEEN items and stock owns three of them, so twelve
-			// of ours plus three is fifteen - one spare. Anything added here has to
-			// be counted against that, and the guard below says so out loud if it
+			// Colour Channels used to be dropped here to stay inside the budget,
+			// and it is now gone entirely - the add-on reads the channel order out
+			// of the back buffer description, so it was a control over nothing.
+			// That leaves a spare slot; anything added has to be counted against
+			// it, and the guard where the rows are built says so out loud if it
 			// ever stops fitting.
-			//
-			// Channel order is the one to lose: it is not a per-shot decision, it is
-			// a fix-it you reach for once because a render came out with red and blue
-			// swapped. It is still in Render.ini and in RE+ Render Settings.
-			//
-			// It is the only one here that is not a creative decision: you come
-			// to it because a render came out with red and blue swapped, and
-			// having done that once you never touch it again. It is still in
-			// Render.ini and in RE+ Render Settings, which is where a fix-it
-			// setting can live without costing a line that a per-shot control
-			// needs. Everything else on this screen is used every session.
-			return row != ROW_CHANNELS;
+			(void)row;
+			return true;
 		}
 
 		bool rowEnabled(int row)
