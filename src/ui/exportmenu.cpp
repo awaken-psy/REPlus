@@ -87,6 +87,7 @@ namespace exportmenu
 		{
 			ROW_ENABLE = 0,   // Config::enableRenderer
 			ROW_OUTPUT,       // renderMode + renderJpeg
+			ROW_PRESET,       // renderVideoPreset - Video output only
 			ROW_FPS,          // renderFps
 			// Above the blur rows on purpose: this decides HOW the sub-frames
 			// are gathered, and the two below only parameterise it. Reading
@@ -312,6 +313,7 @@ namespace exportmenu
 			{
 			case ROW_ENABLE:    return "Rockstar Editor+";
 			case ROW_OUTPUT:    return "Output";
+			case ROW_PRESET:    return "Encoder Preset";
 			case ROW_FPS:       return "Frame Rate";
 			case ROW_CAPTURE:   return "Capture Mode";
 			case ROW_DOF_ON:    return "IGCS Depth of Field";
@@ -356,6 +358,11 @@ namespace exportmenu
 					return buf;
 				}
 				return c.renderJpeg ? "JPEG Frames" : "PNG Frames";
+
+			case ROW_PRESET:
+				// The ini stores an empty string for "use the two argument keys",
+				// which would draw as a blank row. Name it instead.
+				return c.renderVideoPreset.empty() ? "(none)" : c.renderVideoPreset.c_str();
 
 			case ROW_FPS:
 				// %g so 23.976 keeps its decimals and 60 does not grow any.
@@ -534,6 +541,20 @@ namespace exportmenu
 				       "actually pointing at - and it is a DEPTH, not a spot: "
 				       "everything the same distance away comes out sharp too.\n\n"
 				       "Off leaves focus wherever the add-on's panel last set it.";
+
+			case ROW_PRESET:
+				return "Which codec the video is encoded with, by name, from the "
+					"presets folder.\n\n"
+					"A preset supplies BOTH the ffmpeg arguments and the container, so "
+					"while one is chosen RenderVideoArgs and RenderVideoExt in Render.ini "
+					"are ignored entirely.\n\n"
+					"Twenty-one ship, across delivery (h264, h265, av1, vp9), the same on "
+					"the GPU (nvenc_h264, nvenc_hevc, nvenc_av1), editing intermediates "
+					"(prores_hq, dnxhr_hq, cineform) and lossless (utvideo, ffv1, "
+					"lossless). RE+ Render Settings builds more.\n\n"
+					"(none) hands encoding back to the two argument keys in Render.ini, "
+					"for arguments written by hand.\n\n"
+					"Frames output does not encode anything, so this is greyed out there.";
 
 			case ROW_CAPTURE:
 				// Contrasts BOTH modes rather than describing the selected one,
@@ -789,6 +810,34 @@ namespace exportmenu
 				c.writeRenderBool("RenderDofAutofocus", c.renderDofAutofocus);
 				break;
 
+			case ROW_PRESET:
+			{
+				// Cycles rather than clamps: there is no "more" or "less" preset,
+				// and walking off either end should come back round rather than
+				// park you on whatever sorted last.
+				//
+				// The folder is re-read on every press instead of cached, so a
+				// preset saved from RE+ Render Settings while the game is running
+				// shows up without a restart. It is a handful of tiny files behind
+				// a keypress; caching would buy nothing and go stale.
+				std::vector<std::string> names;
+				videoout::presetNames(names);
+
+				const int total = (int)names.size() + 1;   // + "(none)" at 0
+				int cur = 0;
+				for (size_t i = 0; i < names.size(); ++i)
+					if (_stricmp(names[i].c_str(), c.renderVideoPreset.c_str()) == 0)
+					{
+						cur = (int)i + 1;
+						break;
+					}
+
+				const int next = (cur + (delta > 0 ? 1 : total - 1)) % total;
+				c.renderVideoPreset = (next == 0) ? std::string() : names[next - 1];
+				c.writeRenderStr("RenderVideoPreset", c.renderVideoPreset.c_str());
+				break;
+			}
+
 			case ROW_CAPTURE:
 				// Two-way again. Depth of field left this enum because it is a
 				// LENS, not a way of gathering time - it has its own row below.
@@ -877,9 +926,9 @@ namespace exportmenu
 			// Colour Channels used to be dropped here to stay inside the budget,
 			// and it is now gone entirely - the add-on reads the channel order out
 			// of the back buffer description, so it was a control over nothing.
-			// That leaves a spare slot; anything added has to be counted against
-			// it, and the guard where the rows are built says so out loud if it
-			// ever stops fitting.
+			// Encoder Preset took the slot that freed, so the column is FULL at
+			// thirteen: the next row added has to drop one here, and the guard
+			// where the rows are built says so out loud if it ever stops fitting.
 			(void)row;
 			return true;
 		}
@@ -934,6 +983,10 @@ namespace exportmenu
 				return false;
 
 			// A focus point you cannot move is not a setting.
+
+			// Frames output never runs an encoder, so the preset that would drive
+			// one is not a choice there.
+			if (row == ROW_PRESET && !c.wantsVideo()) return false;
 
 			return true;
 		}

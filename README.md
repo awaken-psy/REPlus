@@ -124,9 +124,11 @@ All settings are in the editor. Open a marker's menu and find the
 Pages rather than one long list because the editor's Scaleform column draws 16
 rows and silently discards the rest.
 
-The Export screen carries nine extra rows — **Rockstar Editor+**, then Output,
-Frame Rate, Capture Mode, Motion Blur, Shutter, Highlight Boost, Audio and Colour
-Channels. Turning the renderer
+The Export screen carries thirteen extra rows — **Rockstar Editor+**, then
+Output, Encoder Preset, Frame Rate, Capture Mode, IGCS Depth of Field, Aperture,
+Bokeh Quality, Autofocus, Motion Blur, Shutter, Highlight Boost and Audio. That
+fills the column exactly: it draws sixteen and the screen carries three stock
+rows. Turning the renderer
 on greys out the game's own Frame Rate and Bit rate, which configure an encoder
 that will not run; turning it off greys ours instead. Either way the panel on the
 right explains the highlighted row, including a greyed one — so the game's own
@@ -934,9 +936,9 @@ set is written instead and this file is left alone.
 
 ### `Render.ini`
 
-The seven rows on the editor's Export screen write straight into this file, so
-the two are never out of step — the menu is the same settings with descriptions
-attached. The keys below that have no row are the ones you set once.
+The thirteen rows on the editor's Export screen write straight into this file,
+so the two are never out of step — the menu is the same settings with
+descriptions attached. The keys below that have no row are the ones you set once.
 
 | Key | Default | |
 |---|---|---|
@@ -951,7 +953,7 @@ attached. The keys below that have no row are the ones you set once.
 | `RenderDofAutofocus` | 1 | measure focus in the world each frame |
 | `RenderJpeg` `RenderQuality` | 0 / 90 | JPEG instead of PNG |
 | `RenderKeepFrames` | 0 | Video mode: keep frames too |
-| `RenderVideoPreset` | | a name from `presets\` |
+| `RenderVideoPreset` | | a name from `presets\`, or the **Encoder Preset** row on the Export screen |
 | `FfmpegPath` | | empty = bundled, then beside the exe, then PATH |
 | `RenderAudio` | 1 | record and mux project sound |
 | `RenderHideHud` | 1 | hide the editor HUD while rendering |

@@ -31,6 +31,15 @@
 // =============================================================================
 namespace videoout
 {
+	// Every preset in the folder, without the .ini, in the order a menu should
+	// cycle them.
+	//
+	// It writes the shipped set first if they are missing. They are otherwise
+	// only written when a render STARTS, which is after the first moment anyone
+	// would go looking for one - so a fresh install would have offered an empty
+	// list on the Export screen and nothing to pick.
+	void presetNames(std::vector<std::string>& out);
+
 	// Overrides AudioFromFile for the next encode. Set by the render when a
 	// real-time audio pass has produced a wav of its own.
 	void setAudio(const char* path);

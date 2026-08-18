@@ -260,6 +260,27 @@ namespace videoout
 		return s_ext.c_str();
 	}
 
+	void presetNames(std::vector<std::string>& out)
+	{
+		out.clear();
+		writeDefaultPresets();
+
+		WIN32_FIND_DATAA fd{};
+		const std::string dir = paths::sub("presets");
+		HANDLE h = FindFirstFileA((dir + "*.ini").c_str(), &fd);
+		if (h == INVALID_HANDLE_VALUE) return;
+		do
+		{
+			if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+			std::string n = fd.cFileName;
+			const size_t dot = n.rfind('.');
+			if (dot != std::string::npos) n = n.substr(0, dot);
+			if (!n.empty()) out.push_back(n);
+		}
+		while (FindNextFileA(h, &fd));
+		FindClose(h);
+	}
+
 	std::string s_audioOverride;
 	void setAudio(const char* path) { s_audioOverride = path ? path : ""; }
 
