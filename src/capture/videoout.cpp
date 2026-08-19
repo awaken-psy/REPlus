@@ -12,6 +12,7 @@
 
 #include <string>
 #include <fstream>
+#include <mutex>
 
 namespace videoout
 {
@@ -22,6 +23,81 @@ namespace videoout
 		bool   s_started = false;
 		int    s_pushed  = 0;         // frames handed over
 		char   s_outPath[MAX_PATH]{};
+
+		// ffmpeg's own stdout and stderr, and a thread that does nothing but
+		// empty them.
+		//
+		// IT USED TO INHERIT THE GAME'S HANDLES, and that is what this replaces:
+		//
+		//     si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+		//     si.hStdError  = GetStdHandle(STD_ERROR_HANDLE);
+		//
+		// Whatever those happen to be in GTA5.exe, we do not own them and cannot
+		// drain them. When something else has redirected them to a pipe nobody
+		// reads - FiveM, a ScriptHookV console, an overlay, another export tool -
+		// ffmpeg's first write to stderr fills that pipe's buffer and BLOCKS THERE
+		// FOREVER. With -loglevel error it normally writes nothing, so this only
+		// bites when ffmpeg has something to report, which is exactly when a render
+		// has already gone wrong. Seen as "ffmpeg did not exit" on a finished
+		// 873-frame render, whose actual reason went to a handle we never read.
+		//
+		// A dedicated thread rather than draining from pushFrame: nothing is pushed
+		// between the last frame and end(), and that is precisely the window the
+		// encoder does its final work in - and the window it hung in.
+		HANDLE      s_errRead   = nullptr;
+		HANDLE      s_drain     = nullptr;
+		std::mutex  s_errMutex;
+		std::string s_errTail;        // last kErrTailMax bytes, for the log
+
+		constexpr size_t kErrTailMax = 4096;
+
+		// Bounded, but generous. Measured against the shipped default arguments,
+		// the flush after stdin closes is 0.7s at 720p, 1.6s at 1080p and 4.8s at
+		// 2160p - seconds, not minutes. So a wait that expires does not mean "slow
+		// encoder", it means STUCK; the old 30s was both too short to be sure of
+		// that and too long to sit through in silence.
+		constexpr DWORD kExitWaitMs = 120000;
+		constexpr DWORD kExitTickMs = 10000;
+
+		DWORD WINAPI drainProc(LPVOID)
+		{
+			char  buf[1024];
+			DWORD got = 0;
+			while (s_errRead && ReadFile(s_errRead, buf, sizeof(buf), &got, nullptr) && got)
+			{
+				std::lock_guard<std::mutex> lock(s_errMutex);
+				s_errTail.append(buf, got);
+				if (s_errTail.size() > kErrTailMax)
+					s_errTail.erase(0, s_errTail.size() - kErrTailMax);
+			}
+			return 0;
+		}
+
+		// The last few lines of what ffmpeg said, flattened onto one line so it
+		// fits the log's one-line-per-event shape.
+		std::string errSummary()
+		{
+			std::lock_guard<std::mutex> lock(s_errMutex);
+			size_t start = s_errTail.size();
+			int    lines = 0;
+			while (start > 0 && lines < 4)
+			{
+				const size_t nl = s_errTail.rfind('\n', start - 1);
+				if (nl == std::string::npos) { start = 0; break; }
+				start = nl;
+				++lines;
+			}
+
+			std::string out;
+			for (size_t i = start; i < s_errTail.size(); ++i)
+			{
+				const char c = s_errTail[i];
+				out += (c == '\r' || c == '\n') ? ' ' : c;
+			}
+			while (!out.empty() && out.front() == ' ') out.erase(out.begin());
+			while (!out.empty() && out.back()  == ' ') out.pop_back();
+			return out;
+		}
 
 		// Quote a path for a command line. Paths here come from the ini and from
 		// the render folder, so they can contain spaces; without this ffmpeg
@@ -418,33 +494,63 @@ namespace videoout
 			return false;
 		}
 
+		// A pipe of OUR OWN for ffmpeg's output, so it can always write and we can
+		// always say what it wrote. See the note on s_errRead for why inheriting
+		// the game's handles was not viable.
+		HANDLE errRead = nullptr, errWrite = nullptr;
+		if (!CreatePipe(&errRead, &errWrite, &sa, 1 << 16))
+		{
+			CloseHandle(childRead);
+			CloseHandle(parentWrite);
+			logger::write("info", "video: could not create the encoder log pipe");
+			return false;
+		}
+		SetHandleInformation(errRead, HANDLE_FLAG_INHERIT, 0);
+
 		STARTUPINFOA si{};
 		si.cb         = sizeof(si);
 		si.dwFlags    = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
 		si.wShowWindow = SW_HIDE;
 		si.hStdInput  = childRead;
-		si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
-		si.hStdError  = GetStdHandle(STD_ERROR_HANDLE);
+		si.hStdOutput = errWrite;
+		si.hStdError  = errWrite;
 
 		PROCESS_INFORMATION pi{};
 		const BOOL ok = CreateProcessA(nullptr, cmd, nullptr, nullptr, TRUE,
 			CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
 
+		// Taken BEFORE the handles are closed. CloseHandle sets its own last-error
+		// on the way out, so reading it after the cleanup below reported whatever
+		// the last close did rather than why the launch failed - and that number is
+		// the only clue in a "could not start ffmpeg" report.
+		const DWORD launchErr = ok ? 0 : GetLastError();
+
 		// Ours to close either way: on success the child holds its own copy, and
-		// on failure nothing should be left holding the pipe open.
+		// on failure nothing should be left holding the pipe open. The log pipe's
+		// WRITE end especially - while we hold a copy of that, the read side never
+		// reaches end-of-file and the drain thread would never finish.
 		CloseHandle(childRead);
+		CloseHandle(errWrite);
 
 		if (!ok)
 		{
 			CloseHandle(parentWrite);
-			logger::write("info", "video: could not start ffmpeg (error %lu)", GetLastError());
+			CloseHandle(errRead);
+			logger::write("info", "video: could not start ffmpeg (error %lu)", launchErr);
 			return false;
 		}
 
 		CloseHandle(pi.hThread);
 		s_proc    = pi.hProcess;
 		s_stdin   = parentWrite;
+		s_errRead = errRead;
 		s_started = true;
+
+		{
+			std::lock_guard<std::mutex> lock(s_errMutex);
+			s_errTail.clear();
+		}
+		s_drain = CreateThread(nullptr, 0, drainProc, nullptr, 0, nullptr);
 
 		logger::write("info", "video: encoding to %s @ %g fps [%s]",
 			s_outPath, fps, args.c_str());
@@ -519,22 +625,86 @@ namespace videoout
 			s_stdin = nullptr;
 		}
 
+		bool killed = false;
 		if (s_proc)
 		{
-			// Bounded: a hung encoder must not hang the game. 30s is far more
-			// than finalising a container takes, even for a long render.
-			if (WaitForSingleObject(s_proc, 30000) == WAIT_TIMEOUT)
+			// Bounded - a hung encoder must not hang the game - but with progress,
+			// because a silent stall is indistinguishable from a crash to whoever
+			// is sitting in front of it.
+			DWORD waited = 0;
+			while (WaitForSingleObject(s_proc, kExitTickMs) == WAIT_TIMEOUT)
 			{
-				logger::write("info", "video: ffmpeg did not exit - terminating");
-				TerminateProcess(s_proc, 1);
+				waited += kExitTickMs;
+				if (waited >= kExitWaitMs) { killed = true; break; }
+				logger::write("info",
+					"video: still finalising the container after %lus - waiting",
+					waited / 1000);
 			}
+
+			if (killed)
+			{
+				// Said in full, because the line this replaces read like a note and
+				// the consequence is a lost render.
+				//
+				// The container advice is measured, not assumed. Killing an encoder
+				// 80% of the way through a 400-frame clip and then asking ffmpeg to
+				// read the result back:
+				//
+				//     mp4   9961520 B   moov atom not found        - will not open
+				//     mov   9961508 B   moov atom not found        - will not open
+				//     mkv   8388608 B   file ended prematurely     - PLAYS
+				//
+				// mp4 and mov keep their index in a moov atom written at the very
+				// end, so the payload on disk is unreachable without it. Matroska
+				// writes clusters as it goes and tolerates a missing tail, so the
+				// same interruption costs the last second or two instead of
+				// everything.
+				logger::write("info",
+					"video: !! ffmpeg did not exit after %lus - terminating it. THE VIDEO "
+					"FILE IS PROBABLY UNUSABLE: mp4 and mov write their index at the very "
+					"end, so an encoder killed before it finishes leaves the footage on "
+					"disk with no index and players refuse to open it.",
+					kExitWaitMs / 1000);
+				logger::write("info",
+					"video: if this keeps happening, render to MKV - it writes as it goes "
+					"and survives an interrupted encode, losing only the last moment "
+					"instead of the whole file. The utvideo, ffv1, av1 and lossless "
+					"presets already use it.");
+				if (!Config::get().renderKeepFrames)
+					logger::write("info",
+						"video: the frames were deleted as they were encoded, so there is "
+						"nothing left to re-assemble from. RenderKeepFrames=1 keeps them "
+						"alongside the video.");
+				TerminateProcess(s_proc, 1);
+				WaitForSingleObject(s_proc, 5000);
+			}
+
 			DWORD code = 0;
 			GetExitCodeProcess(s_proc, &code);
 			CloseHandle(s_proc);
 			s_proc = nullptr;
 
+			// The drain thread ends by itself once ffmpeg is gone and the pipe
+			// breaks. Joined before the tail is read, so nothing is still arriving.
+			if (s_drain)
+			{
+				WaitForSingleObject(s_drain, 5000);
+				CloseHandle(s_drain);
+				s_drain = nullptr;
+			}
+			if (s_errRead) { CloseHandle(s_errRead); s_errRead = nullptr; }
+
 			logger::write("info", "video: %s - %d frame(s) -> %s (ffmpeg exit %lu)",
-				complete ? "finished" : "ended early", s_pushed, s_outPath, code);
+				killed ? "TERMINATED" : (complete ? "finished" : "ended early"),
+				s_pushed, s_outPath, code);
+
+			// What ffmpeg actually said, which is the whole point of owning the
+			// pipe: a non-zero exit used to be a bare number, with the reason
+			// written to a handle belonging to whatever else is in the process.
+			const std::string why = errSummary();
+			if (!why.empty())
+				logger::write("info", "video: ffmpeg %s: %s",
+					(code != 0 || killed) ? "said" : "noted", why.c_str());
 		}
 
 		s_started = false;

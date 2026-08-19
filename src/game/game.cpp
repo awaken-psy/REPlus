@@ -1551,17 +1551,6 @@ namespace game
 
 	void fixedTimeSetStep(float stepMs) { s_fxStepMs = stepMs; }
 
-	void fixedTimeSkip(float ms)
-	{
-		if (!addr_FixedTimeTotalNs || !(ms > 0.0f)) return;
-		__try
-		{
-			// Same units the engine uses: FLOAT_MILLISECONDS_TO_NANOSECONDS.
-			auto* acc = (unsigned long long*)addr_FixedTimeTotalNs;
-			*acc += (unsigned long long)((double)ms * 1e6);
-		}
-		__except (EXCEPTION_EXECUTE_HANDLER) {}
-	}
 	void fixedTimeHold(bool hold)       { s_fxHold  = hold;   }
 
 	void fixedTimeEnd()

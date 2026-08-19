@@ -30,6 +30,9 @@ namespace render
 			Slide,    // the clip is PLAYING; accumulate whatever is presented
 			DofPass,  // waiting on the add-on to accumulate one frame across the
 			          // aperture. Tens of seconds, not milliseconds - see kDofGuardMs
+			DofGap,   // one present spent with the shutter closed, so the part of
+			          // the frame the aperture did not cover reaches the world as
+			          // real time rather than as a bare accumulator write
 			ClipJump, // waiting for a clip step we asked the engine for
 			Rewind,   // audio done, going back to clip 1 to start the frames
 			Done,
@@ -54,6 +57,45 @@ namespace render
 		bool     s_dofToldIndex  = false;
 		int      s_dofToldSpan   = 0;
 		float    s_dofClockAtStart = 0.0f;
+
+		// The clock as the closed-shutter present was armed, so the present that
+		// follows can say what it actually moved. Measured rather than assumed
+		// because "the step was set" and "the engine took it" are different
+		// claims, and only the second one reaches the world.
+		float    s_dofClockAtGap   = 0.0f;
+		float    s_dofGapMs        = 0.0f;   // closed-shutter time still to spend
+		int      s_dofGapWait      = 0;      // presents spent trying to spend it
+		int      s_dofPresents     = 0;      // presents in this output frame
+
+		// A stuck clock must not wedge the render. Generous: the point of the
+		// loop is that it takes as many presents as the engine needs, and only a
+		// clock that has stopped entirely should ever reach this.
+		constexpr int kDofGapGuard = 240;
+
+		// HOW MANY PRESENTS THE CLOSED SHUTTER IS SPREAD OVER.
+		//
+		// Not one, and this is the whole reason the first attempt at this changed
+		// nothing. CPtFxGPUManager::PreRender is queued with DLC_Add and RUNS ON
+		// THE RENDER THREAD, where it reads ptFxGPUManager.m_deltaTime live at
+		// execution time - the draw-list command carries only the paused/reset
+		// bools, not the delta. The value is not double-buffered either, though
+		// m_groundPosZ and m_camPosZ right beside it are, so what the render
+		// thread integrates is simply whatever the update thread last wrote.
+		//
+		// Deliver the gap as ONE step and it is a single odd value among ~686
+		// identical tiny ones, and the render thread almost never samples it -
+		// the time reaches the replay clock and never reaches the rain. Spread
+		// over several presents that all carry the SAME step, any lag between the
+		// two threads reads the right number, because its neighbours are equal.
+		//
+		// Eight is far more than the pipeline is deep and costs ~1% of a sweep.
+		//
+		// A TARGET, not a count. Spending exactly N presents and trusting them was
+		// the first attempt and it drifted - frame 1 asked for 27.08ms and moved
+		// 33.85, because presents outside the count take the step too. So the loop
+		// below runs on the CLOCK instead, which is what the non-lens sliding path
+		// does with s_slideTime, and that path is the one whose rain is correct.
+		constexpr int kDofGapPresents = 8;
 		uint32_t s_dofStartMs = 0;
 		int      s_dofRetries = 0;
 
@@ -796,6 +838,52 @@ namespace render
 			return game::clipRealOffsetToClockMs(clock - s_clipBase);
 		}
 
+		// Seek to the next output frame and go back to settling.
+		//
+		// Split out of Step::Ack because there are two ways in now: a frame
+		// whose shutter closed before the frame ended spends a present in
+		// Step::DofGap first, everything else arrives straight from Ack.
+		void seekAndSettle()
+		{
+			s_dofPresents = 0;
+			game::jumpProjectTo(seekTime(), 0);
+
+			// Trace the clock through the whole depth-of-field cycle.
+			//
+			// Three readings a frame, always on in this mode. The playhead was
+			// pinned to one instant for a whole render while the frame counter,
+			// the files and the progress line all looked correct, and reasoning
+			// about WHERE it was being reset produced three wrong answers in a
+			// row. These say it outright: what was asked for, what the clock read
+			// immediately after, and what it read when the next pass opened.
+			if (s_sample == 0)
+			{
+				// Both halves of the time, because seekTime() is built from
+				// sampleTime(), and sampleTime() runs sampleTimeDilated() through
+				// the marker-speed conversion. If the raw one advances and the
+				// converted one does not, the conversion is the fault - and it is
+				// the only step between them.
+				if (Config::get().splineDebugLog)
+					logger::write("info",
+						"seq: frame %d seek -> raw %.1f, asked %.1f, clock %.1f (markerSpeed=%d)",
+						s_frame, sampleTimeDilated(), seekTime(), clockNow(),
+						Config::get().renderMarkerSpeed ? 1 : 0);
+			}
+
+			// Advancing to a new output frame is a real seek - a whole frame
+			// interval. Stepping between sub-samples moves the clock by
+			// dt*shutter/N, a fraction of a millisecond. Waiting the same for
+			// both is what made a render cost minutes per second of footage:
+			// at 64 samples that is 192 frames of waiting per output frame, and
+			// 189 of them are for seeks far too small to need it.
+			//
+			// It cannot go to zero. One redraw per sub-sample is precisely what
+			// produces the blur - skip it and all 64 samples capture the same
+			// image, which averages back to one sharp frame.
+			s_wait = (s_sample == 0) ? s_cfg.settleFrames : s_cfg.settleSubFrames;
+			s_step = Step::Settle;
+		}
+
 		// Point the mapping at whatever clip the editor is showing now, keeping
 		// the project position we are at. Called at the start of a render and
 		// after every clip transition.
@@ -1130,6 +1218,17 @@ namespace render
 		// the frame counter climbs and the picture stays frozen.
 		void landClip()
 		{
+			// A gap present that never got spent: a transition can land from any
+			// step, and this is the one step that has the clock armed for exactly
+			// one present. Left armed it would keep stepping through the settle
+			// below. Narrowly on DofGap, because the sliding path arms the clock
+			// across a seam ON PURPOSE and zeroing it there would stall the clip.
+			if (s_step == Step::DofGap)
+			{
+				game::fixedTimeSetStep(0.0f);
+				s_dofGapMs = 0.0f;
+			}
+
 			game::playbackPause();
 
 			s_clipAt     = s_wantClip;
@@ -1896,6 +1995,13 @@ namespace render
 		// state stays true across a render boundary and the first Escape of the
 		// next render is still an edge.
 		const bool escape = escapePressed();
+
+		// Presents per output frame, for the depth-of-field log. The whole
+		// difference between a lens render and every other kind is how many of
+		// these one frame costs, so it is worth stating rather than inferring
+		// from the add-on's sample count.
+		if (s_step != Step::Idle) ++s_dofPresents;
+
 		if (active() && escape)
 		{
 			logger::write("info", "render: Escape at frame %d/%d - cancelling", s_frame, s_frames);
@@ -3553,6 +3659,56 @@ namespace render
 			return;
 		}
 
+		case Step::DofGap:
+		{
+			// The present that just went by carried the closed part of the frame.
+			// Zero the step before another one can spend it again - the engine
+			// steps on every Process(), whether or not we are looking.
+			//
+			// The clock is now on the next frame's instant by arithmetic, so the
+			// seek that follows agrees with it and moves nothing. It is still
+			// worth doing: it is what applies marker speed and carries a clip
+			// boundary.
+			// SPEND UNTIL THE CLOCK SAYS SO, not until a counter runs out.
+			//
+			// Sized off what is actually LEFT each time, so the last present cannot
+			// overshoot the way a fixed slice did, and equal slices in between so
+			// the render thread reads a representative value whenever it looks.
+			{
+				const float left = s_dofGapMs - (clockNow() - s_dofClockAtGap);
+				if (left > 0.01f && ++s_dofGapWait < kDofGapGuard)
+				{
+					const float slice = s_dofGapMs / (float)kDofGapPresents;
+					game::fixedTimeSetStep(left < slice ? left : slice);
+					return;
+				}
+			}
+
+			game::fixedTimeSetStep(0.0f);
+
+			// WHAT THE PRESENTS ACTUALLY MOVED, not what they were asked to.
+			//
+			// The whole point of spending a present here rather than crediting the
+			// accumulator is that a real step reaches fwTimer, and through it
+			// everything the replay simulates instead of storing. If this number
+			// comes back at ~0 the step was not taken and the seek below is doing
+			// the work again - which looks identical in the footage and is exactly
+			// the failure this was meant to remove.
+			if (s_frame < 3 || Config::get().splineDebugLog)
+			{
+				const float moved = clockNow() - s_dofClockAtGap;
+				logger::write("info",
+					"render: frame %d - the closed shutter moved the clock %.2fms of "
+					"the %.2fms asked for, across %d presents; %d presents in the "
+					"whole frame%s",
+					s_frame, moved, s_dofGapMs, s_dofGapWait + 1, s_dofPresents,
+					moved < 1.0f ? " - THE STEP WAS NOT TAKEN" : "");
+			}
+
+			seekAndSettle();
+			return;
+		}
+
 		case Step::ClipJump:
 		{
 			// Waiting on a clip step we asked for.
@@ -3624,54 +3780,49 @@ namespace render
 				reportProgress();
 			}
 
-			// Credit the accumulator for what this seek just moved.
+			// THE CLOSED SHUTTER HAS TO BE LIVED THROUGH, NOT BOOKED.
 			//
-			// The sweep advanced it by the SHUTTER; this seek advances the clock by a
-			// whole frame. Without the difference the clock ends up ahead of its own
-			// target and the engine's Max(target - current, 0) clamps every later
-			// step to zero - which is why 180 degrees blurred on frame 0 and never
-			// again, while 360, where the two happen to be equal, worked throughout.
+			// The aperture sweep advances the clock by the SHUTTER - `total` steps
+			// of shutter/total - and the rest of the frame used to be handed to
+			// fixedTimeSkip, which added it straight to the engine's nanosecond
+			// accumulator. That kept the accumulator level with the seek below, so
+			// the footage landed on the right instants and every frame LOOKED
+			// correct.
+			//
+			// But an accumulator write is not a time step. Anything the replay
+			// SIMULATES rather than stores integrates fwTimer::GetTimeStep(), and
+			// that only ever carries what a present actually stepped. The GPU
+			// weather particles are the visible case: CVisualEffects::Update ->
+			// CVfxWeather::Update -> CPtFxGPUManager::Update caches the frame delta
+			// and the drop shader advances by it. So rain was handed `shutter`
+			// milliseconds of time per `s_dt` milliseconds of footage and fell at
+			// exactly RenderShutter of its proper speed - half at 0.5, a quarter at
+			// 0.25, and right at 1.0, where the gap is zero and there was nothing
+			// to lose. The seek does not make it up either: a cursor jump restores
+			// RECORDED entities, and these are not recorded.
+			//
+			// So spend the gap rather than book it: one present with the clock
+			// stepping by it, which is what the non-lens sliding path already does
+			// with s_fxGapMs. The engine credits sm_exportTotalNs itself when it
+			// takes the step, so the accumulator still ends the frame level with
+			// the seek - the reason fixedTimeSkip existed - without the clock
+			// running ahead of its own target. One present on top of the ~236 an
+			// aperture sweep already costs at the default quality.
 			if (slidingDof())
 			{
 				const float gap = s_dt - dofShutterMs();
-				if (gap > 0.0f) game::fixedTimeSkip(gap);
-			}
-			game::jumpProjectTo(seekTime(), 0);
-
-			// Trace the clock through the whole depth-of-field cycle.
-			//
-			// Three readings a frame, always on in this mode. The playhead was
-			// pinned to one instant for a whole render while the frame counter,
-			// the files and the progress line all looked correct, and reasoning
-			// about WHERE it was being reset produced three wrong answers in a
-			// row. These say it outright: what was asked for, what the clock read
-			// immediately after, and what it read when the next pass opened.
-			if (s_sample == 0)
-			{
-				// Both halves of the time, because seekTime() is built from
-				// sampleTime(), and sampleTime() runs sampleTimeDilated() through
-				// the marker-speed conversion. If the raw one advances and the
-				// converted one does not, the conversion is the fault - and it is
-				// the only step between them.
-				if (Config::get().splineDebugLog)
-					logger::write("info",
-						"seq: frame %d seek -> raw %.1f, asked %.1f, clock %.1f (markerSpeed=%d)",
-						s_frame, sampleTimeDilated(), seekTime(), clockNow(),
-						Config::get().renderMarkerSpeed ? 1 : 0);
+				if (gap > 0.0f)
+				{
+					game::fixedTimeSetStep(gap / (float)kDofGapPresents);
+					s_dofGapMs      = gap;
+					s_dofGapWait    = 0;
+					s_dofClockAtGap = clockNow();
+					s_step = Step::DofGap;
+					return;
+				}
 			}
 
-			// Advancing to a new output frame is a real seek - a whole frame
-			// interval. Stepping between sub-samples moves the clock by
-			// dt*shutter/N, a fraction of a millisecond. Waiting the same for
-			// both is what made a render cost minutes per second of footage:
-			// at 64 samples that is 192 frames of waiting per output frame, and
-			// 189 of them are for seeks far too small to need it.
-			//
-			// It cannot go to zero. One redraw per sub-sample is precisely what
-			// produces the blur - skip it and all 64 samples capture the same
-			// image, which averages back to one sharp frame.
-			s_wait = (s_sample == 0) ? s_cfg.settleFrames : s_cfg.settleSubFrames;
-			s_step = Step::Settle;
+			seekAndSettle();
 			return;
 		}
 

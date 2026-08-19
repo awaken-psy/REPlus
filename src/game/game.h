@@ -245,18 +245,6 @@ namespace game
 	// A zero step yields a zero delta, so the clip waits instead.
 	void fixedTimeHold(bool hold);
 
-	// Credit the accumulator for time the clock moved WITHOUT us stepping it -
-	// a seek, most of all.
-	//
-	// The engine derives each step as Max(absoluteTarget - currentClock, 0), and
-	// the target comes from sm_exportTotalNs. Seek the clock forward without
-	// telling the accumulator and the clock sits AHEAD of its own target, so
-	// every step clamps to zero until the accumulator catches up. At a 360
-	// degree shutter the sweep happens to advance exactly one frame and the two
-	// stay level by luck; at 180 the clock ran half a frame ahead after the
-	// first frame and never stepped again.
-	void fixedTimeSkip(float ms);
-
 	// Hand the engine back exactly what it had. Safe to call unconditionally.
 	void fixedTimeEnd();
 	bool transportReady();

@@ -794,6 +794,59 @@ broken footage.
 > render, that points at the clock feeding them rather than at anything here, and
 > it is unconfirmed either way.
 
+**Rain was a separate problem, and a real bug.** It gets its own note because it
+looked like the cloth one and was reported as it, and the two have nothing in
+common. Weather particles are *dt-driven* — the GPU drop shader advances by the
+frame's time step, not by one step per frame — so they failed in the opposite
+direction: too **slow**, not too fast, and only in a **depth-of-field** render.
+The cause is not the amount of time — it is the *size of each step*.
+
+An aperture sweep divides one frame among hundreds of samples, so at the default
+quality each present advances the clip by about **0.06 ms**. The engine's GPU
+weather particles cannot integrate a step that small. `PtFxGPUManager.cpp` says
+so in as many words — *"we use half floats for velocity and position, we get
+precision issues when the time delta goes below a small value"* — and ships
+`0.009f`, **9 ms**, as "the minimum value that works correctly". The sweep was
+handing it a step 150× below that, so the drops barely advanced while everything
+replayed from the recording moved perfectly normally.
+
+The giveaway is that rain does not run at a steady fraction of its speed — it
+starts nearly **frozen and accelerates**, over about ten frames at 48 samples and
+over several seconds at 800. That is rounding on a running sum: each step adds
+gravity to the drop's velocity, and once that addition falls below the precision
+of the number it is being added to, it is silently dropped. Velocity climbs until
+it hits a ceiling set by the step size — roughly 1 m/s at 685 samples a frame,
+about 17 m/s at 48, and no ceiling at all with the two steps a plain sliding
+render uses. Rain falls at around 9 m/s, which is why one looks broken, one looks
+sluggish at the start, and one looks right.
+
+The other tell, and it is worth remembering for any similar report:
+peds, vehicles and the camera are *replayed from recorded positions*, so they
+land correctly however the frame's time is subdivided. Only what the engine
+**integrates live** — rain, mist, cloth — can be got wrong this way.
+
+**This is an engine limit, and it is not going to be fixed here.** Two repairs
+were built and both were abandoned. Coarsening the clock into 9 ms steps works
+for the particles and destroys the motion blur, which is the whole point of the
+feature. Leaving the clock alone and scaling only what the particles integrate —
+holding them still through the exposure, then handing them one whole frame at
+once — is sound in principle, was implemented against the right field in both
+builds, and still did not put rain back to normal speed on screen.
+
+At that point the honest conclusion is that the engine is being asked to render
+several hundred frames per unit of game time, and its live-simulated systems were
+never built for it. There is no setting for this, because there is nothing that
+usefully trades off.
+
+**What actually helps: fewer samples.** The precision ceiling scales with the
+step, so a lower ring count raises it — around 48 samples a frame is already
+above rain's own falling speed, where 686 is nowhere near. A lens shot in the
+rain wants a modest ring count. A dry one can afford any number you like.
+
+The distinction worth keeping: **cloth is too fast, rain was too slow, in the
+same render.** Anything that integrates a time step can be repaired from here;
+anything that counts frames instead cannot.
+
 ### Depth of field
 
 Two ways in: as a **render modifier**, which is what you want for a finished
@@ -1069,6 +1122,7 @@ you can change it. Delete the ini to have a current one written.
 | Colours wrong in the render, fine on screen | Fixed in this build, with nothing to set. The add-on used to ask ReShade for the finished frame, and ReShade hands the channels back in a different order depending on its own version, so on some installs red and blue arrived swapped. It copies the back buffer itself now and reads the order from the buffer's own description. `RenderChannelOrder` and the **Colour Channels** row are gone |
 | Multi-clip render stops after the first clip | The project's clip table read as empty, so multi-clip stepping never armed and the render ended where clip one did. It happens when the project was not fully loaded for playback — open it in the editor first, then Export. The log says so outright, with the clip count it actually read |
 | A render ended early for no obvious reason | Every finish now logs the replay mode it stopped in. `EDIT` is normal; `LOADCLIP` means it stopped during a clip transition, which is worth reporting with the log |
+| The video file will not open | If the log says `TERMINATED`, ffmpeg was killed before it finished and an mp4 or mov has no index without its final write — the footage is on disk but unreachable. The line after it says what ffmpeg was complaining about. Rendering to **MKV** survives this: it writes as it goes and loses only the last moment |
 | Got frames, expected video | `RenderMode=Frames`, or ffmpeg not found — the log says which |
 | A shake setting does nothing | Per-marker values override the ini and always win. If the menu shows a number rather than `Default`, that marker has its own. `ShakeDebugLog=1` logs what reached the camera |
 | Shake looks frozen | The playhead is paused. Play or scrub |

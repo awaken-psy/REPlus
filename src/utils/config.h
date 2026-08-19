@@ -788,6 +788,7 @@ struct Config
 	// not polled, so the panel is authoritative at every other moment.
 	float renderDofBokehSize = 0.15f;  // aperture diameter. THE creative control
 	int   renderDofQuality   = 12;     // rings; the sample total follows from it
+
 	bool  renderDofAutofocus = true;   // measure focus in the world each frame
 	// ALWAYS 0.5/0.5 - autofocus measures at the centre of frame.
 	//
@@ -1168,11 +1169,6 @@ struct Config
 		// <=1 already means "no blur" everywhere downstream, so the floor is only
 		// about keeping the divisor sane; the ceiling is what stops a stray extra
 		// digit turning one output frame into an hour of capture.
-		if (renderDofBokehSize < 0.001f) renderDofBokehSize = 0.001f;
-		if (renderDofBokehSize > 10.0f)  renderDofBokehSize = 10.0f;
-		if (renderDofQuality   < 1)      renderDofQuality   = 1;
-		if (renderDofQuality   > 100)    renderDofQuality   = 100;
-
 		if (renderSamples < 1)    renderSamples = 1;
 		if (renderSamples > 4096) renderSamples = 4096;
 
@@ -1261,6 +1257,34 @@ struct Config
 
 		renderDofBokehSize = rFloat("RenderDofBokehSize", renderDofBokehSize);
 		renderDofQuality   = rInt  ("RenderDofQuality",   renderDofQuality);
+
+		// CLAMPED HERE, next to the reads, and that placement is the whole point.
+		//
+		// These two used to sit beside the RenderSamples pair much further up -
+		// which is BEFORE the reads above, so they bounded the compiled defaults
+		// and let anything in Render.ini through untouched. They had been dropped
+		// in between a comment and the RenderSamples code it describes, which is
+		// how the ordering went unnoticed.
+		//
+		// The ceiling on the rings is the one that matters: the aperture sample
+		// total is 1 + pointsPerRing * q*(q+1)/2, so it grows with the square and
+		// a mistyped 500 asks for ~375,000 renders of a single frame.
+		if (renderDofBokehSize < 0.001f) renderDofBokehSize = 0.001f;
+		if (renderDofBokehSize > 10.0f)  renderDofBokehSize = 10.0f;
+		if (renderDofQuality   < 1)      renderDofQuality   = 1;
+		if (renderDofQuality   > 100)    renderDofQuality   = 100;
+		// RenderDofMinStepMs is gone. It carried sweep time until it had 9ms and
+		// spent it at once, to lift the GPU weather particles above the precision
+		// floor they integrate at. It cannot work: the engine credits its export
+		// accumulator only with what we ASK for, so a carried remainder left the
+		// accumulator behind the seek, Max(target - current, 0) clamped the sweep to
+		// zero inside ten frames, and every aperture sample then landed on the same
+		// instant - no motion blur at all, and rain frozen rather than merely slow.
+		// Deleted on sight rather than ignored, because we WROTE it into people's
+		// files and a dead key reads like a setting for as long as it sits there.
+		if (!renderIniPath.empty())
+			WritePrivateProfileStringA("Render", "RenderDofMinStepMs", nullptr, renderIniPath.c_str());
+
 		renderDofAutofocus = rBool ("RenderDofAutofocus", renderDofAutofocus);
 		renderDofFocusDelta= rFloat("RenderDofFocusDelta", renderDofFocusDelta);
 
