@@ -243,7 +243,8 @@ namespace gsig
 	//
 	// Identified by its constants: 0x200 REPLAY_CURSOR_SPEED, 0x100
 	// REPLAY_CURSOR_NORMAL, 0x20001 PLAY|DIRECTION_BACK, 0x10001 PLAY|
-	// DIRECTION_FWD - matching SetCursorSpeed's source line for line.
+	// DIRECTION_FWD - four immediates in that order, in one function, is
+	// distinctive enough to name it with confidence.
 	//
 	// We scan this rather than SetNextPlayBackState because the latter is a tiny
 	// setter with no distinctive prologue; we derive it from the call below.
@@ -2582,7 +2583,7 @@ namespace gsig
 	// by an EXACT frame duration, accumulated in integer nanoseconds. It is what
 	// Rockstar's own video export runs on.
 	//
-	// Source: game/control/replay/ReplayInternal.cpp:3456-3564. The gate is
+	// Read off the decompile of that function, the gate is
 	//   sm_pPlaybackController && IsExportingToVideoFile() && sm_fixedTimeExport
 	//   && (IsStartingClipNextFrame() || !IsExportingPaused())
 	// Miss any of it and the frame delta is 0.0 - a frozen clock, which is what
