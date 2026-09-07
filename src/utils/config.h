@@ -73,6 +73,17 @@ struct Config
 	// changing targets stay on stock behaviour; see rmarker::isSplineable.
 	bool  splineAttached = true;
 
+	// Drive the replay camera from an external trajectory file instead of the
+	// marker splines. The production pipeline compiles a move plan against the
+	// recorded player path into absolute poses over clip time; see
+	// replay/external_trajectory.h for the CSV format. When this is on and a
+	// table is loaded, applySpline defers to it wholesale - markers are not
+	// consulted, shake/DoF/trace still run afterwards.
+	bool  externalTrajectory = false;
+	// Empty = trajectory.csv next to the ini. Relative paths resolve against
+	// the ini folder, absolute paths are used as-is.
+	std::string externalTrajectoryFile;
+
 	// Log the camera's position and orientation every frame, with the pieces it
 	// was built from: the parent's origin, the curve's displacement, the
 	// smoothing delta, and the frame the director wanted before we touched it.
@@ -1055,6 +1066,13 @@ struct Config
 
 		enabled           = getBool("Enabled", enabled);
 		splinePosition    = getBool("SplinePosition", splinePosition);
+		externalTrajectory = getBool("ExternalTrajectory", externalTrajectory);
+		{
+			char etf[MAX_PATH]{};   // external trajectory file
+			GetPrivateProfileStringA("RockstarEditorPlus", "ExternalTrajectoryFile",
+				"", etf, sizeof(etf), ini.c_str());
+			externalTrajectoryFile = etf;
+		}
 		splineOrientation = getBool("SplineOrientation", splineOrientation);
 		splineFov         = getBool("SplineFov", splineFov);
 		splineAttached    = getBool("SplineAttached", splineAttached);

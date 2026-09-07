@@ -13,6 +13,7 @@
 #include "replay/spline.h"
 #include "replay/quat.h"
 #include "replay/freecam.h"
+#include "replay/external_trajectory.h"
 #include "replay/settings.h"
 #include "ui/menu.h"
 #include "lights/lightstore.h"
@@ -589,6 +590,19 @@ namespace smoothblend
 		s_trace.orient   = '-';
 
 		const Config& cfg = Config::get();
+
+		// The external trajectory replaces the spline WHOLESALE, before every
+		// gate below: it does not consult markers at all, so "no markers" or
+		// "marker is a CUT" must not be allowed to decline it. declineReason is
+		// set first so the trace still logs every driven pose, tagged - the
+		// STOCK line carries pos/fwd/fov either way.
+		if (extraj::active())
+		{
+			s_declineReason = "external trajectory";
+			extraj::apply(self);
+			return;
+		}
+
 		if (!cfg.splinePosition && !cfg.splineOrientation && !cfg.splineFov)
 		{
 			s_declineReason = "toggles all off";
@@ -1647,6 +1661,11 @@ namespace smoothblend
 		// Deferred flush of per-marker settings. Cheap: a compare until the
 		// store has actually been quiet for half a second. See rsettings::tick.
 		rsettings::tick();
+
+		// The external trajectory loader. Same argument as rsettings::tick: this
+		// detour is the one per-frame main-thread call we can rely on, and the
+		// load is mtime-gated so it is a no-op until the file actually changes.
+		extraj::tick();
 
 		// The add-on's copy-to-keyframe button. Polled here for the same reason
 		// render::pump() is: this detour is the one place we reliably get a

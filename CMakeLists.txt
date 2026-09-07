@@ -90,6 +90,17 @@ SplineOrientation=1        ; splined rotation; look-at markers re-aim instead
 SplineFov=1                ; monotone zoom curve, no overshoot
 SplineAttached=1           ; also spline shots mounted on a car/bike/ped
 LookAtReaim=1              ; re-aim look-at markers after moving the camera
+
+; --- External trajectory (production pipeline) -------------------------------
+; 1 = drive the replay camera from a CSV of absolute poses over clip time,
+; bypassing the marker splines entirely. See replay/external_trajectory.h.
+; Table: t_ms,ax,ay,az,bx,by,bz,cx,cy,cz,px,py,pz,fov (Matrix34 rows).
+; File is hot-reloaded on change; frames we drive are traced as
+; "STOCK [external trajectory] pos/fwd/fov" lines in the trace log.
+; The file key is a STRING: no inline comment after it (a ';' there would be
+; read as part of the path). Empty = trajectory.csv in this folder.
+ExternalTrajectory=0       ; 0 = markers/splines, 1 = external CSV
+ExternalTrajectoryFile=
 LookAtAspect=0             ; aspect for that re-aim; 0 = the display's
 OnlySmoothBlend=1          ; 1 = only "Smooth" markers, 0 = "Linear" too
 
