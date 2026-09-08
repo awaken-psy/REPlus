@@ -101,6 +101,11 @@ LookAtReaim=1              ; re-aim look-at markers after moving the camera
 ; read as part of the path). Empty = trajectory.csv in this folder.
 ExternalTrajectory=0       ; 0 = markers/splines, 1 = external CSV
 ExternalTrajectoryFile=
+; External render trigger (pipeline): rewriting the trigger file opens the
+; Export exactly like the button - the file's mtime is the signal. First
+; sight never fires; only a CHANGED stamp does. Same STRING rule below.
+ExternalTrigger=0          ; 1 = watch the trigger file
+ExternalTriggerFile=
 LookAtAspect=0             ; aspect for that re-aim; 0 = the display's
 OnlySmoothBlend=1          ; 1 = only "Smooth" markers, 0 = "Linear" too
 

@@ -84,6 +84,16 @@ struct Config
 	// the ini folder, absolute paths are used as-is.
 	std::string externalTrajectoryFile;
 
+	// External render trigger (pipeline): rewriting the trigger file opens the
+	// Export/bake from the frontend frame, exactly like the button. The mtime
+	// is the signal - first sight never fires, only a CHANGED stamp does, so a
+	// file left from the last session cannot surprise-render. See
+	// capture/trigger.cpp. String key: no inline ';' comments (ini reader
+	// includes them in the value - the ExternalTrajectoryFile lesson).
+	bool  externalTrigger = false;
+	// Empty = trigger.txt next to the ini. Path resolution as above.
+	std::string externalTriggerFile;
+
 	// Log the camera's position and orientation every frame, with the pieces it
 	// was built from: the parent's origin, the curve's displacement, the
 	// smoothing delta, and the frame the director wanted before we touched it.
@@ -1072,6 +1082,13 @@ struct Config
 			GetPrivateProfileStringA("RockstarEditorPlus", "ExternalTrajectoryFile",
 				"", etf, sizeof(etf), ini.c_str());
 			externalTrajectoryFile = etf;
+		}
+		externalTrigger = getBool("ExternalTrigger", externalTrigger);
+		{
+			char etr[MAX_PATH]{};   // external trigger file
+			GetPrivateProfileStringA("RockstarEditorPlus", "ExternalTriggerFile",
+				"", etr, sizeof(etr), ini.c_str());
+			externalTriggerFile = etr;
 		}
 		splineOrientation = getBool("SplineOrientation", splineOrientation);
 		splineFov         = getBool("SplineFov", splineFov);

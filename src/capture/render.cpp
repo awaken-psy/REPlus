@@ -8,6 +8,7 @@
 #include "main.h"
 #include "capture/render.h"
 #include "capture/fxcapture.h"
+#include "capture/trigger.h"
 #include "game/worldprobe.h"
 #include "capture/exporthook.h"
 #include "capture/videoout.h"
@@ -478,6 +479,13 @@ namespace render
 					game::openPlayback(gsig::PLAYBACK_TYPE_BAKE);
 				}
 			}
+
+			// Pipeline trigger file. Same context as the audio-pass re-open
+			// above (frontend update = what TriggerExport itself runs in), and
+			// the check is throttled to a stat every ~2s, so the per-frame cost
+			// is one integer compare.
+			trigger::checkAndFire();
+
 			origPointer();
 
 			// Clear it AFTER Update as well.
