@@ -21,6 +21,7 @@
 #include "replay/shake.h"
 #include "capture/render.h"
 #include "capture/dofsession.h"
+#include "capture/trigger.h"
 
 using spline::Vec3;
 
@@ -1666,6 +1667,18 @@ namespace smoothblend
 		// detour is the one per-frame main-thread call we can rely on, and the
 		// load is mtime-gated so it is a no-op until the file actually changes.
 		extraj::tick();
+
+		// The pipeline's external trigger. Same mtime poll as extraj::tick and
+		// the same reason it lives here: hkPointer's host (MousePointerUpdate)
+		// only runs while the game's mouse-pointer subsystem is awake, and an
+		// unattended run parks it for good - the pipeline drives the editor
+		// with the keyboard alone, so Task 6's acceptance (a human moving the
+		// mouse) passed while the headless runs the next day never consumed a
+		// trigger again. This detour is the one per-frame main-thread call we
+		// can rely on in that state. Re-entry is safe: firing clears the armed
+		// flag before Open runs, so a synchronous camera update inside Open
+		// finds the poll disarmed.
+		trigger::checkAndFire();
 
 		// The add-on's copy-to-keyframe button. Polled here for the same reason
 		// render::pump() is: this detour is the one place we reliably get a
