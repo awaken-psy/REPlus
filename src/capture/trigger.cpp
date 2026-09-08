@@ -73,7 +73,13 @@ namespace trigger
 
 		if (s_seen && s_cooldown > 0) { --s_cooldown; }
 		if (s_seen && s_cooldown > 0) return;   // throttled, nothing new anyway
-		s_cooldown = 120;                          // ~2s of frontend frames
+		s_cooldown = 10;                           // ~0.2s of frontend frames.
+		                                           // Was 120 (~2s): post-render the
+		                                           // game throttles to ~1fps, so 120
+		                                           // frames took MINUTES and the
+		                                           // pipeline's wait expired first
+		                                           // (2026-09-08). A stat every 10
+		                                           // frames costs nothing measurable.
 
 		const FILETIME now = mtimeOf(resolvePath());
 

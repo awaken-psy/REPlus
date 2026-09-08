@@ -173,10 +173,14 @@ namespace extraj
 		const Config& cfg = Config::get();
 		if (!cfg.externalTrajectory) { s_loadedOnce = false; s_samples.clear(); return; }
 
-		// Throttle the stat call to roughly one every two seconds of editor
-		// frames, the same cadence Lights.ini uses for its hot reload.
+		// Throttle the stat call to roughly one every 0.2 seconds of editor
+		// frames, the same cadence Lights.ini uses for its hot reload. Was
+		// 120 (~2s at 60fps): post-render the game throttles to ~1fps, so a
+		// fresh table sat unloaded for minutes - the pipeline's chained next
+		// round fired its trigger before the previous round's table ever
+		// landed (2026-09-08).
 		if (s_loadedOnce && s_cooldown > 0) { --s_cooldown; return; }
-		s_cooldown = 120;
+		s_cooldown = 10;
 
 		const std::string want = resolvePath();
 		const FILETIME ft = mtimeOf(want);
