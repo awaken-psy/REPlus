@@ -50,6 +50,15 @@ namespace extraj
 	// Called from the per-frame tick; does its own throttling.
 	void tick();
 
+	// Zero the tick throttle so the very next tick stats the file. The
+	// pipeline's trigger fires this on consumption: post-render the director
+	// parks (no UpdateSmoothing ticks at all), and a table deployed for the
+	// next round must be loaded during the bake transition's first ticks -
+	// a frozen 120-frame throttle would push the load up to ~120 output
+	// frames into the render, contaminating them with the previous round's
+	// trajectory (2026-09-08 render_0009).
+	void armReload();
+
 	// Drive the director's frame at the current replay time. Caller has
 	// already checked active(). Writes the three basis rows, the position
 	// and the FOV (clamped to the engine's 1..130).

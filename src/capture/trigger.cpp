@@ -10,6 +10,7 @@
 #include "capture/exporthook.h"
 #include "capture/fxcapture.h"
 #include "capture/render.h"
+#include "replay/external_trajectory.h"
 #include "game/game.h"
 #include "game/signatures.h"
 #include "utils/config.h"
@@ -131,6 +132,14 @@ namespace trigger
 
 		s_armed = false;
 		logger::write("info", "trigger: external trigger consumed - opening Export/bake");
+		// The trajectory table rides along: zero the reload throttle so the
+		// next tick stats the file. Consumption happens on the bake
+		// transition's first tick - the pipeline has usually JUST deployed
+		// the next round's table, and without this the frozen 120-frame
+		// throttle would land the load up to ~120 output frames into the
+		// render (2026-09-08 render_0009: the first 38 frames followed the
+		// previous round's trajectory).
+		extraj::armReload();
 		game::openPlayback(gsig::PLAYBACK_TYPE_BAKE);
 	}
 }

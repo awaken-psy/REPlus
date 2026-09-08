@@ -194,6 +194,17 @@ namespace extraj
 		}
 	}
 
+	void armReload()
+	{
+		// The throttle counts editor frames, and across a parked director it
+		// freezes at whatever remained - the next burst of ticks burns it off
+		// before the stat finally happens. Zeroing it here (trigger
+		// consumption) makes the very next tick stat the file, which is the
+		// whole point: the bake transition's first ticks must carry the NEW
+		// table, not the previous round's.
+		s_cooldown = 0;
+	}
+
 	bool active()
 	{
 		return Config::get().externalTrajectory && !s_samples.empty();
