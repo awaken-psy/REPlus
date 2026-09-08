@@ -15,6 +15,7 @@
 #include "capture/audioout.h"
 #include "capture/dofsession.h"
 #include "game/signatures.h"
+#include "replay/external_trajectory.h"
 
 #include <cstdio>
 
@@ -485,6 +486,18 @@ namespace render
 			// the check is throttled to a stat every ~2s, so the per-frame cost
 			// is one integer compare.
 			trigger::checkAndFire();
+
+			// The trajectory table's mtime gate, polled here as well as in
+			// UpdateSmoothing. After a bake finishes the director goes idle and
+			// UpdateSmoothing stops running - the camera it updates is not
+			// moving - so a table deployed for the NEXT render round sat
+			// unloaded until the bake transition happened to tick the detour
+			// once (2026-09-08: cam1's reload missed a 20s window entirely).
+			// The frontend keeps ticking in that state, and both detours run
+			// on the game's main thread, so the extra poll is just a stat that
+			// lands a few frames earlier. The gate is idempotent: a no-op
+			// until the file mtime actually changes.
+			extraj::tick();
 
 			origPointer();
 
