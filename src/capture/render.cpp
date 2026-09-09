@@ -191,6 +191,10 @@ namespace render
 		// the flush below. There is deliberately no ini key - the only value a
 		// person could supply is a worse one than the measurement.
 		float s_slideSpeed   = 0.05f;
+	// True while a frame sample is in flight and the sliding cursor is paused
+	// for it (see the lastDone() wait in the capture path). finish() restores
+	// the speed so an aborted render never leaves the cursor frozen.
+	bool   s_slideHoldPause = false;
 		bool  s_slideCapture = false;// false = advancing to the mark, true = exposing
 		double s_slideMark   = 0.0;  // clip time at which this frame's exposure opened
 		int   s_slideLogged  = 0;    // last speed reported, to keep the log quiet
@@ -955,6 +959,36 @@ namespace render
 				s_cfg.jpeg ? "jpg" : "png");
 		}
 
+		// Per-frame replay-clock stamp, written next to the frames. The
+		// sliding controller paces the clock against a load-dependent present
+		// rate, so two renders of the same clip do NOT share a frame->time
+		// mapping (measured 0.5-1.7 s of cross-camera drift at 60 fps with a
+		// fast cinematic plan) - downstream alignment must read these stamps
+		// instead of assuming frame N is at N/fps.
+		void logFrameTime(int frame, float clockMs)
+		{
+			if (clockMs < 0.0f) return; // no replay clock - nothing to stamp
+
+			char path[MAX_PATH];
+			snprintf(path, sizeof(path), "%s\\frame_times.txt", s_folder);
+
+			FILE* f = nullptr;
+			if (fopen_s(&f, path, "a") != 0 || !f) return;
+			fprintf(f, "%d %.3f\n", frame, clockMs);
+			fclose(f);
+		}
+
+		// A fresh sequence must not inherit the previous render's stamps (the
+		// audio->frame folder-reuse branch re-enters here by design).
+		void resetFrameTimes()
+		{
+			char path[MAX_PATH];
+			snprintf(path, sizeof(path), "%s\\frame_times.txt", s_folder);
+			FILE* f = nullptr;
+			if (fopen_s(&f, path, "w") != 0 || !f) return;
+			fclose(f);
+		}
+
 		// Drop an ffmpeg cheat-sheet next to the frames.
 		//
 		// The intended workflow is to render with no in-engine blur at a
@@ -1055,6 +1089,15 @@ namespace render
 			// Leaving it swapped past the render outlives what it points into.
 			game::fixedTimeEnd();
 			s_fxStep = false;
+
+			// A sample could be in flight with the cursor paused for it - the
+			// render is going away either way, so restore the speed rather than
+			// leave the editor's cursor frozen in preview afterwards.
+			if (s_slideHoldPause)
+			{
+				game::playbackSetSpeed(s_slideSpeed);
+				s_slideHoldPause = false;
+			}
 
 			// Unconditional, and first. A pass left running would keep sweeping an
 			// aperture for a render that no longer exists, and it holds the editor
@@ -1527,6 +1570,7 @@ namespace render
 				if (reason) *reason = kNoFolder;
 				return false;
 			}
+			if (reuse) resetFrameTimes();
 
 			if (s_cfg.fps     < 1.0f) s_cfg.fps = 1.0f;
 			if (s_cfg.samples < 1)    s_cfg.samples = 1;
@@ -3370,17 +3414,35 @@ namespace render
 			// whether or not we captured, so returning here without holding would
 			// advance past a sub-sample that never made it into the accumulator -
 			// an exposure quietly short by one sample, per stutter.
+			//
+			// SLIDING (fxStep off): the add-on snapshots a LATER present - between
+			// the request and that present the clip keeps rolling at slide speed,
+			// so the stamped clock drifts ahead of the pixels by the response lag
+			// (0.3-1 s at 60 fps, load-dependent, per-camera inconsistent). Pause
+			// the cursor while waiting and resume the controller's speed once the
+			// sample lands - the stamp then equals the frame's world time exactly.
 			if (!fxcapture::lastDone())
 			{
-				if (s_fxStep) game::fixedTimeHold(true);
+				if (s_fxStep) { game::fixedTimeHold(true); return; }
+				if (!s_slideHoldPause)
+				{
+					game::playbackSetSpeed(0.0f);
+					s_slideHoldPause = true;
+				}
 				return;
 			}
 			if (s_fxStep) game::fixedTimeHold(false);
+			else if (s_slideHoldPause)
+			{
+				game::playbackSetSpeed(s_slideSpeed);
+				s_slideHoldPause = false;
+			}
 
 			const int want = s_cfg.samples < 1 ? 1 : s_cfg.samples;
 
 			char path[MAX_PATH];
 			buildPath(path, sizeof(path));
+			logFrameTime(s_frame, clockNow());
 			fxcapture::requestSample(path, want, s_slideSample);
 
 			if (++s_slideSample >= want) s_slideFlush = true;
